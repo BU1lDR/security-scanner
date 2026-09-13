@@ -1,0 +1,309 @@
+# Decisions & Concepts Log
+
+> **What this file is.** A living record for the Security Scanner project. It has two jobs:
+> 1. **Decisions log** — every meaningful choice we make while building, and *why* we made it, so nobody (including future-us) has to re-argue it later.
+> 2. **Concepts glossary** — plain-language explanations of every idea, pattern, and problem-area this project touches.
+>
+> **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
+
+**Last updated:** 2026-09-13
+**Status:** Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests. Integration seams frozen in `docs/specs/v1-integration-contract.md`.
+
+---
+
+## Part 1 — What we are building (in one paragraph)
+
+A **security scanner**: a tool that inspects websites, web apps, and their source code, finds security weaknesses, explains them in plain language, and suggests (or applies) fixes. It is meant to be both a strong portfolio project *and* a tool that can genuinely be used against targets you own or are allowed to test.
+
+---
+
+## Part 2 — Decisions Log
+
+Each entry: **the decision**, then **why**. Newest decisions get added at the bottom over time.
+
+### D1 — Narrow and deep, not broad and shallow
+We will do a focused set of things really well, instead of trying to do everything badly.
+**Why:** "Complete AND advanced AND covers every kind of app" is impossible for one person. Every feature we skip is a feature we can do properly. Depth is what makes it impressive and useful.
+
+### D2 — Goal is "portfolio piece that is also genuinely usable"
+The tool must be clean and well-made (like a showcase), but also actually work against real, authorized targets.
+**Why:** This is what the project owner asked for. It rules out both "toy demo" and "half-built enterprise product."
+
+### D3 — v1 = "Deep Unified Core"
+Version 1 includes: a shared findings core, plus three scanners (SCA, DAST, SAST) at honest depth, plus an optional AI advisor that explains and helps fix issues.
+**Why:** This gives us the ambitious *architecture* (three sources of findings under one brain) while keeping the *amount of work* finishable. See Part 4 for what each scanner is.
+
+### D4 — Use real third-party libraries (not standard-library-only)
+Unlike the earlier File Integrity Checker project, this tool is allowed to depend on outside libraries.
+**Why:** Writing an async web client, HTML parsing, and TLS inspection from scratch with only Python's built-ins would be slow, buggy, and pointless. Good libraries already solve these.
+**Chosen libraries (initial):** `httpx` (talking to websites, supports async), `beautifulsoup4` + `lxml` (reading HTML), `cryptography` (inspecting TLS certificates), the official Anthropic SDK (the AI layer).
+
+### D5 — Build it as a proper installable package, not one big file
+The code will be organized into folders and modules, installable via `pyproject.toml`.
+**Why:** This project is roughly ten times bigger than a single-script tool. One giant file would become impossible to read, test, or extend.
+
+### D6 — Language & style: Python 3.11+, asynchronous, command-line first
+It runs from the terminal (like the owner's other projects) and uses async so it can check many things at once without being slow.
+**Why:** Matches the owner's existing toolset and skills; async is the right fit for network-heavy work.
+
+### D7 — One shared "Finding" format for everything
+Every scanner, no matter what it looks at, produces results in the same standard shape (a "Finding").
+**Why:** So the reporting and AI layers only ever deal with one format, instead of three different ones. This is the glue that makes "unified" real.
+
+### D8 — Safety guardrails live inside the core, not added later
+Scope limits, an "off by default" rule for intrusive checks, and rate limiting are built into the foundation.
+**Why:** A scanner sends real traffic to real targets. Doing this against something you don't own is illegal, and hammering a server can break it. Safety cannot be an afterthought.
+
+### D9 — Active (intrusive) checks are OFF by default
+Checks that only *look* (passive) run freely. Checks that *send attack-style input* (active) require an explicit flag and an authorization acknowledgment.
+**Why:** Passive checks are safe anywhere. Active checks can be disruptive and are only legal on authorized targets, so the user must consciously turn them on.
+
+### D10 — The AI advisor is optional
+The three deterministic scanners are the actual product. If there is no AI API key, the tool still fully works — it just won't have AI explanations/fixes.
+**Why:** The AI is a helpful add-on, not the engine. The tool must never become useless because an API key is missing or an AI service is down.
+
+### D11 — The AI never finds or exploits vulnerabilities — it only reasons about found ones
+The AI reads findings that the deterministic scanners already produced. It does not go hunting or attacking on its own.
+**Why:** If the AI were trusted to find bugs, it could "hallucinate" (make up) problems that aren't real. Keeping it downstream of proven findings keeps results trustworthy.
+
+### D12 — Auto-fix is deliberately limited in v1
+The tool will **automatically apply** only the safe, easy-to-verify fixes: bumping a vulnerable dependency to a fixed version, and simple config/text edits — and only after the user confirms. For anything touching real application code, it shows a **diff (proposed change) that the user must approve**; it never silently rewrites code.
+**Why:** Auto-editing code you can't verify is how you quietly break someone's project. Version bumps and config flags are low-risk and checkable; arbitrary code changes are not.
+
+### D13 — Error handling: one broken check must not kill the whole scan
+If a single check crashes, it becomes a recorded "scan error" and the scan continues. Network errors get retried with backoff, then recorded.
+**Why:** A long scan that dies on one bad response wastes everything. This mirrors the resilient design of the owner's File Integrity Checker.
+
+### D14 — CI-friendly exit codes
+`0` = clean, `1` = findings at or above a chosen severity, `2` = the tool itself errored.
+**Why:** Lets the scanner slot into automated pipelines (e.g., "fail the build if a High-severity issue is found"). Same convention as the owner's other tools.
+
+### D15 — Testing: test-driven, using fixtures instead of live targets
+Tests use saved/canned inputs (recorded web responses, sample dependency files, sample code snippets). The AI layer is faked in tests.
+**Why:** Tests must be fast, repeatable, and must never depend on a live website or a paid AI call.
+
+### D16 — Clear list of things we are NOT building in v1
+Deferred to future versions: autonomous "AI hacks it for you" exploitation, malware scanning, mobile/desktop app analysis, deep dataflow/taint code analysis, and automatic rewriting of arbitrary code.
+**Why:** Each of these is a large separate project. Naming them as "not now" protects the v1 scope from creeping back to "build everything."
+
+### D17 — AI provider: Anthropic Claude API, behind a swappable interface
+The AI advisor uses the Anthropic Claude API by default, reached through a generic provider interface so a different service could be plugged in later.
+**Why:** The owner deferred this choice ("don't care right now"), so we take the sensible default — the strongest available models, with a design that doesn't lock us in. Multi-provider support is deferred, not blocked.
+
+### D18 — Auto-fix scope confirmed as in D12
+Confirmed final: automatically apply only dependency version bumps and simple config/text edits (after user confirmation); all application-code changes are shown as an approved diff, never applied silently.
+**Why:** The owner deferred this choice, so the cautious scope from D12 stands.
+
+### D19 — We ran a design review and froze an "integration contract"
+Before writing scanner code, we designed all three scanners plus the core in depth and had the designs independently checked. The check found each design was fine alone but they didn't agree on the shared shapes (the Finding format, how rules are named, how config is spelled, how a scanner plugs in). We froze one answer to each in `docs/specs/v1-integration-contract.md`; that file wins over any individual design.
+**Why:** Pieces designed in isolation always drift apart at the seams. Pinning the seams once, up front, is far cheaper than discovering three incompatible `Finding` types after the code is written.
+
+### D20 — One frozen Finding shape: structured location, string evidence, string references
+A Finding has: rule_id, title, severity, confidence, a **structured** `Location`, an `evidence` **string**, remediation, the emitting `scanner`, a list of reference strings, an optional `Fix`, and a computed `fingerprint`.
+**Why:** Each scanner points at a different *kind* of place (a URL + parameter, a file + line, or a dependency), so location must be structured. But evidence and references are just for humans to read, so plain strings keep the whole thing simple. This replaced two richer competing proposals.
+
+### D21 — Rule IDs follow one grammar: `family.category.name`
+All rule IDs are lowercase dotted, at least three parts, where the first part is `sca`, `dast`, or `sast`. A validator enforces it. Example: `dast.active.xss-reflected`.
+**Why:** Reports group by rule ID prefix, and de-duplication keys on it. Four different naming styles (seen across the drafts) would break both. One grammar, checked at the door.
+
+### D22 — Two allowlists: "Scope" (what we may attack) vs "Egress" (our own data sources)
+The target Scope is default-deny and seeded to the target host. A **separate** Egress allowlist covers the tool's own infrastructure — OSV, the package registries, and the Anthropic API — which we call for data but never crawl or attack. Every request passes through one choke point that allows a host if it is in Scope **or** in Egress, and refuses everything else.
+**Why:** A default-deny Scope alone would have blocked the dependency scanner from reaching its vulnerability database and blocked the AI advisor from reaching its API — both are non-target hosts. Separating "targets" from "our own services" fixes that without loosening the target boundary.
+
+### D23 — One Scanner interface: async generator, declares what it `Requires`
+Every scanner implements the same interface: a classmethod `applicable(target)`, a `requires` descriptor (needs a URL? needs code? is it active?), and an async `scan(ctx)` that **yields** Findings as it goes.
+**Why:** The drafts disagreed on the method name, arguments, and whether it returned a list or streamed. One interface lets the engine treat every scanner identically and select scanners just by reading their `requires`.
+
+### D24 — DAST is split into two registered scanners: `dast` (passive) and `dast-active`
+The passive tier and the active tier are separate scanners. Only the active one is marked `active`, so the engine's "active off by default" gate applies to it cleanly while passive keeps running.
+**Why:** If DAST were one scanner, marking it active would switch off the safe passive checks too; marking it passive would let intrusive checks slip past the gate. Splitting it makes the safety gate correct.
+
+### D25 — Active checks need three things at once (fail-closed authorization)
+An active scanner runs only if: (1) the `--active` flag is set, **and** (2) an explicit authorization acknowledgment is given (`--i-am-authorized`), **and** (3) the target host is in a non-empty active allowlist. Miss any one and the active scanner simply isn't selected.
+**Why:** This is decisions.md D9 made concrete. A single flag is too easy to leave on by accident; requiring an explicit "I'm authorized" plus a per-host allowlist makes running intrusive checks a deliberate act.
+
+### D26 — One context object and one error record shared by all scanners
+Scanners receive one `ScanContext` (target, scope, the sanctioned HTTP client named `http`, config, logger, and error-collection helpers). A failing check becomes one standard `ScanError` and the scan continues.
+**Why:** The drafts invented three context shapes and four error shapes. One of each means the engine's fault-isolation and reporting work the same for every scanner (and realizes D13).
+
+### D27 — One shared rate limiter; scanners don't add their own
+The HTTP client owns the single process-wide rate limiter (requests/sec per target + a global concurrency cap). Scanners bound how *many* requests they make, but never the *rate* — that's the client's job. Infrastructure egress has its own gentler budget.
+**Why:** If each scanner throttled independently, together they could still hammer the target. Centralizing the rate limit is the only way to honor it across all scanners at once.
+
+### D28 — Add the `packaging` library for dependency-version math
+The dependency scanner needs to parse and compare version numbers correctly (PEP 440), so we add the `packaging` library.
+**Why:** Comparing versions as plain strings ("1.10" vs "1.9") is wrong; `packaging` does it right and is the standard tool for it.
+
+### D29 — Adversarially review the core *before* building scanners on top of it
+Before writing any scanner, we ran a large fan-out review over the finished core (the Finding model, scope, egress, the request gate, locations, config, the engine) whose only job was to *try to break it*. Every claimed defect was independently re-checked ("is this actually real?") before we acted. Seven real defects were fixed test-first; several plausible-sounding ones were checked and deliberately rejected. The concrete fixes:
+- **Duplicate-detection could be defeated by the URL.** The finding fingerprint keyed on the raw network location (which includes port, user info, and letter case), so `HTTP://Example.com:80/x` and `http://example.com/x` looked like different issues. Now it keys on the lowercased host + path only.
+- **A scheme-less target silently disabled the whole scan.** `Scope.from_url("example.com")` produced an empty "allow nothing" scope that refused every request without saying why. Now a bare host is accepted, and a target with no resolvable host is a loud error.
+- **The active-check gate contradicted its own rule.** It could classify one of our own infrastructure hosts (the vulnerability database, etc.) as an attack target if it were mistakenly listed in scope. Now infrastructure hosts are never treated as active targets.
+- **The gate trusted odd URL schemes.** `file://`, `ftp://`, `gopher://` were authorized on the hostname alone. Now only `http`/`https` are allowed through.
+- **Location text dropped information.** A code column with no line number was silently discarded, and a vulnerable-dependency finding didn't show which manifest file (e.g. `requirements.txt`) it came from. Both are now shown.
+- **Two `Target` flags used identity instead of truthiness**, so an empty-string URL disagreed with the target's own validation. Fixed.
+- **The Finding model didn't enforce the rule-ID grammar on construction**, unlike its sibling types. It now validates on creation, so a malformed rule ID can't slip in.
+**Why:** The core is the one piece every scanner depends on; a defect here would be inherited by all of them. Reviewing it adversarially — and verifying each finding before acting — is far cheaper now than after five scanners are built on top. This is the same "prove it fails first" discipline we use for tests, applied to the design.
+
+### D30 — One reporter, three renderers (terminal, JSON, HTML), grouped by family
+Findings are rendered by a single `render(report, format)` function that dispatches to one of three renderers and refuses an unknown format. All three group findings by *family* (the first part of the rule ID — `sca`/`dast`/`sast`) and sort worst-first. The machine format (JSON) writes the stable enum *names* (`"HIGH"`), omits empty location fields, and always includes a severity-count summary and the list of scan errors. The HTML renderer escapes every piece of finding text before putting it in the page.
+**Why:** Keeping all formatting in one place (and out of the scanners) means a scanner never worries about presentation. Escaping HTML matters especially here: a finding's evidence can itself contain attacker-controlled markup (we scan hostile sites), so an un-escaped report would be a way to attack the person reading it.
+
+### D31 — The `secscan` command line is a thin harness with three exit codes
+The CLI only wires the pieces together — read config, build the scope, open the one HTTP client, run the engine, render the report — and adds no detection logic. It figures out on its own whether the target you typed is a URL or a code folder (an `http(s)://` prefix or a bare hostname like `example.com` is a website; an existing path is code), and it reports through a single exit code: **0** = clean, **1** = at least one finding at or above the severity threshold, **2** = the scan itself failed (bad config, bad target, an unexpected crash). For active checks it maps `--active` to "turn the mode on" and `--i-am-authorized` to the authorization acknowledgment (D25), and it adds *only the host you explicitly typed* to the active allowlist — never any other in-scope host a crawl might later discover. If you ask for active checks without acknowledging authorization, it says so and runs passive checks only rather than failing silently.
+**Why:** Exit codes are how this tool fits into automation (CI pipelines read them); making 0/1/2 mean exactly one thing keeps that contract clean. Auto-allowlisting *only the typed host* keeps the single-target common case ergonomic without weakening the real protection D25 provides — which is stopping active checks from bleeding onto *other* hosts the scanner wanders into.
+
+### D32 — The SCA scanner: manifests → OSV → CVSS → one finding per known vulnerability
+The first real scanner is complete. It walks the target's code folder (skipping `.git`, `node_modules`, virtualenvs, build output), reads dependency files it understands — `requirements.txt`, `pyproject.toml`, `package.json`, `package-lock.json` — and resolves each *pinned* dependency to an exact name + version. It sends all of them to the OSV vulnerability database in **one batched request**, then fetches the full record for each vulnerability that comes back. Severity is taken from the advisory's **CVSS** score where present (we compute the 0–10 base score from the vector ourselves, following the v3.1 formula), falling back to the database's own rating, then to High. Each finding carries the exact manifest file and line it came from, the recommended upgrade, and a rich set of references (advisory pages, the OSV link, and every alias like the CVE number). A finding is marked **auto-applicable** only when a fixed version above the installed one exists — a dependency bump is the one code-adjacent change D12 lets us auto-apply.
+**Why:** Most application risk lives in borrowed code, so SCA is the highest-value scanner to build first. Doing our own CVSS math (rather than trusting a single vendor rating) means severities are accurate and explainable. Batching keeps us to essentially two round-trips regardless of project size, which the shared rate limiter (D27) then paces politely.
+
+### D33 — Build the one HTTP client for *every* scan, even a code-only one
+A live end-to-end run caught a bug no unit test did: the CLI only opened the shared HTTP client for *web* targets, reasoning that a code folder has nothing to fetch. But SCA runs on a code folder and still needs the network — to reach OSV. With no client, it silently found nothing. The fix: always build the client. It opens no connection until the first request, the request gate still enforces scope and egress, and code-only scans now reach their data sources. A regression test locks this in.
+**Why:** "Code target = no network" conflated the *attack* surface (which a code folder lacks) with the *egress* surface (which every scan needs for its data sources). The two allowlists are separate for exactly this reason (D22); the client must exist whenever *either* is in play. This is the payoff of end-to-end testing: unit tests injected the client directly and so all passed while the real wiring was broken.
+
+### D34 — Collapse OSV's duplicate advisory records into one finding per real vulnerability
+OSV federates several databases, so a single real-world flaw usually arrives as *multiple* records — a GitHub advisory (`GHSA-…`), a Python advisory (`PYSEC-…`), and the `CVE-…` itself — each cross-listing the others as aliases. Left alone, these become two or three near-identical findings for the same problem (and the cross-scanner de-duplicator can't merge them, because each has a different rule ID). We group records whose identifier sets overlap (a connected-components/union-find pass over id + aliases), then emit **one** finding per group. The group's representative is the richest record (prefer GHSA, then a CVE-bearing record); we report it under that ID, take the worst severity any record in the group assigns, and keep every other ID as a reference so nothing is lost.
+**Why:** Reporting the same CVE three times is noise that erodes trust in the tool. De-duplicating by alias — verified end-to-end to reduce a real scan to zero repeated CVEs — is what separates a usable report from a raw database dump.
+
+### D35 — The recommended upgrade is OSV's fix boundary, phrased "or later"
+`select_fixed_version` returns the smallest published fixed version strictly greater than what's installed — which is exactly the version where the fix first landed. Sometimes that boundary is a pre-release (e.g. pyyaml's fix first shipped in `5.2b1`). We report it as "upgrade to `5.2b1` **or later**," which correctly includes the stable release. We deliberately do *not* try to skip the pre-release to the "next stable," because without a full version list from the package registry we can't tell whether a stable release exists just above the boundary or only far above it — guessing risks recommending a needlessly large upgrade. A registry-backed resolver that picks the nearest stable is a possible future refinement.
+**Why:** The honest, minimal, correct statement from OSV's data is the fix boundary plus "or later." Inventing a stable target we can't verify would trade a correct recommendation for a guess.
+
+### D36 — Force UTF-8 console output so advisory text never crashes the report
+On Windows the console/pipe often defaults to a legacy code page (cp1252) that can't encode characters appearing in upstream advisory text — which could abort a scan at the very last step, *after* real findings were gathered. At start-up the CLI reconfigures its output streams to UTF-8 with "replace on failure," so unencodable characters degrade to a placeholder instead of crashing. The human report also uses plain ASCII for its own decorations (a `-` separator, not an em-dash) so the tool's own chrome is always safe regardless of terminal.
+**Why:** A scanner that finds a critical vulnerability and then dies printing it is worse than useless. Output robustness is part of correctness for a CLI whose data comes from arbitrary third-party text.
+
+### D37 — The passive DAST scanner: one live look, split into five independent analyzers
+The second scanner is the *passive* half of DAST (`dast`). It requires a URL, is always-on for web targets, and never sends an attack payload — it fetches the entry page **once** and inspects what any ordinary browser would already receive. That single response feeds three pure analyzers: **security headers** (missing HSTS, CSP, `X-Content-Type-Options`, clickjacking protection, `Referrer-Policy`), **fingerprinting** (version-leaking `Server` / `X-Powered-By` / ASP.NET headers), and **cookies** (missing `Secure` / `HttpOnly` / `SameSite`). Two further probes go slightly beyond pure observation but stay strictly in-bounds: **TLS inspection** (read the certificate without verifying it, then judge expiry / not-yet-valid / weak-protocol / self-signed) and **exposed-file recon** (a handful of same-origin, GET-only, soft-404-calibrated probes for `.env` and `.git/`). Each analyzer is a standalone, independently-tested function; the scanner is a thin orchestrator that runs three groups — `response`, `tls`, `exposed` — each through `ctx.run_check`, so one failure is recorded and isolated, never fatal. The intrusive request-mutating work is deliberately *not* here; it lives in the separate `dast-active` scanner behind the triple gate (contract §12). Every DAST finding carries `fix=None`, because a live app has no file for us to patch (contract §7).
+**Why:** Splitting the tier into small pure analyzers plus a thin orchestrator is what makes it testable without a live server (each analyzer is unit-tested with hand-built inputs — real certificates, canned headers) and keeps a single crashing check from sinking the rest. Live testing proved the isolation matters: against an expired-certificate host the *verifying* HTTP client refuses the connection (recorded as one error) while the dedicated TLS reader — which reads certs without verification by design — still reports the expired cert. Scanning only the entry URL is sufficient for v1 because these signals are site-uniform; per-page crawling is deferred to when the active tier needs it (the crawler→active bridge is owned by the active scanner).
+
+### D38 — The active DAST scanner: crawl → bridge → detection-only injection, behind the triple gate
+The third scanner is the *active* half of DAST (`dast-active`, contract §12). It is a **separate, gated** scanner: the engine selects it only when all three of `--active` (sets `dast.active.enabled`), `--i-am-authorized` (sets `scope.authorized_ack`), and the target host being in `scope.active_allowlist` hold — and as defence in depth the scanner *also* refuses to run unless `dast.active.enabled` is set. Its pipeline has three stages, each a separately-tested unit: (1) a small, same-origin **crawler** (`dast/crawler.py`) walks links breadth-first — bounded by `dast.crawler.max_depth`/`max_pages`, never leaving scope, every fetch a passive `GET` — and produces `Page` (URL + query params) and `Form` (action, method, every named field incl. hidden/CSRF) records; (2) the **crawler→active bridge** (`injection.py`) turns those into `InjectionPoint`s, one per (request, parameter), preserving all sibling/hidden fields at their captured values, skipping non-target field types (hidden/submit/…), collapsing duplicate endpoints, and skipping POST unless `dast.active.include_post` is set (GET query params are the safe default); (3) three **detection-only checks** (`checks.py`) each send crafted requests with `active=True` (so the choke point re-applies the gate) and judge only from the response: `dast.active.xss-reflected` (a benign non-executing marker reported only if reflected *unescaped*), `dast.active.sqli-error` (a single quote reported only if it produces a DB error string a baseline request did not), and `dast.active.open-redirect` (a reserved external sentinel URL in URL-shaped params, reported only on a 3xx to that host). Each (check, point) run is fault-isolated via `ctx.run_check`; total active traffic is capped by `dast.active.max_requests`, and hitting the cap is logged (never a silent truncation).
+**Why:** Packaging active as its own scanner is what lets the engine gate the *whole* intrusive surface with one rule instead of sprinkling checks through the passive tier. The payloads are the minimum needed to *observe* a flaw, never to exploit one (D8): no `OR 1=1`, no working script, no data access — a single quote, an inert marker, a redirect sentinel. The baseline comparison for SQLi and the unescaped-only rule for XSS are precision guards that keep false positives down. Verified end-to-end against a local, deliberately-vulnerable server: all three checks fire on the right parameters, and — critically — `--active` *without* `--i-am-authorized` produces zero active findings while passive checks still run, proving the gate is fail-closed in practice, not just in unit tests.
+
+### D39 — The SAST scanner: a curated regex rule pack over source files, with redaction and precision guards
+The fourth scanner is **pattern SAST** (`sast`, `Requires(code=True)`, offline — no HTTP). v1 is deliberately *regex* SAST, **not** dataflow/taint analysis (deferred): it reads each source file and flags lines matching a curated rule pack in two families — **sinks** (`sast.sink.*`: `eval`/`exec`, `pickle.loads`, unsafe `yaml.load`, `subprocess(shell=True)`, `os.system`, weak MD5, JS `eval`/`innerHTML`, Django `mark_safe`) and **secrets** (`sast.secret.*`: AWS keys, private keys, GitHub/Google/Slack tokens, JWTs, and a generic high-entropy `key = "..."` heuristic). The design is four separately-tested units: the rule pack (`rules.py` — each `Rule` carries its compiled regex, applicable file extensions, severity/confidence, and guards), file discovery + safe reading (`walk.py` — prune vendored dirs, skip binary/oversized files, decode leniently), the pure matcher (`matcher.py` — text → findings, one per (rule, line)), and a thin orchestrator (`scanner.py`) that reads the `sast.*` config (`enabled`, `exclude_dirs`, `min_confidence`) and scans each file under `ctx.run_check` isolation. Two invariants are load-bearing: **secrets are redacted at construction** — a secret finding's evidence is built from a masked value (`AKIA****************`) and *never* includes the raw source line, so a credential cannot leak into a report or log (contract §4, D10); and **precision guards run before a finding exists** — a `negate` pattern suppresses safe forms (`yaml.load(..., Loader=SafeLoader)`), a negative lookbehind stops `literal_eval` matching the `eval` rule, and the noisy generic-secret rule additionally requires a Shannon-entropy floor and a placeholder filter (so `your-api-key-here` is ignored). Confidence encodes epistemics: a definite pattern match is FIRM (the sink *is* present, even if we can't prove it's reachable), fixed-format tokens are FIRM, and heuristic rules (generic secret, `innerHTML`, `mark_safe`) are TENTATIVE — leaving exploitability to the human. Every SAST finding carries `fix=None` in v1 (contract §7).
+**Why:** Regex SAST is honestly bounded — it says "this pattern is here," not "an attacker can reach it" — so the whole design leans into *precision and safety* rather than pretending to do taint analysis: the guards exist to cut the false positives that make pattern scanners get ignored, and the confidence levels tell the reader exactly how much to trust each hit. Redaction is non-negotiable: a security tool that prints the secrets it finds is a new liability, so masking happens where the Finding is built, not later. A subtle but important call: the entropy + placeholder filters apply *only* to the generic heuristic rule — applying broad substring markers to a fixed-format key (AWS/GitHub/…) would risk a false *negative* on a real leaked credential, which for a HIGH-severity secret is worse than an occasional false positive. Live-verified end-to-end through the real CLI over a deliberately-vulnerable tree: 11 findings across Python/JS files, all secrets redacted, and the safe forms (`SafeLoader`, `literal_eval`, the placeholder key) correctly producing zero findings.
+
+### D40 — The AI advisor: an optional-by-default layer that reasons *only* over findings, and can never auto-apply
+The last piece of v1 is not a scanner — it is an **advisor** that runs after the deterministic scan and, for each finding, asks a language model to explain the risk and give concrete remediation steps, then attaches that text to the finding as a fix. Three properties make it safe to ship inside a security tool. **(1) It is off by default and purely additive.** `build_advisor(...)` returns `None` unless `ai.enabled` is set *and* an `ANTHROPIC_API_KEY` is present in the environment (a secret belongs in the environment, never a config file); the CLI's `--ai` flag flips `ai.enabled`. When it is off, or the key is missing, or a call fails, the scan result is byte-for-byte what it would have been without AI — the deterministic report is the product, the AI is garnish. **(2) It reasons only over already-found findings.** The prompt (`build_prompt`) is assembled *solely* from a finding's own fields — `rule_id`, `title`, `severity`, `confidence`, `location`, the *already-redacted* `evidence`, `remediation`, `references` — never the raw source, never a fresh fetch, never the target itself; and the `SYSTEM_PROMPT` forbids the model from inventing facts, from asking to scan/fetch/access anything, and from producing working exploit code (it describes the fix, not the attack). This is the D9 boundary made concrete: no autonomous AI exploitation. **(3) Its output can never be auto-applied.** Advice is attached as `Fix(kind=FixKind.MANUAL, apply_safe=False)`, and `Fix.__post_init__` structurally *refuses* to let a `MANUAL`/`CODE_PATCH` fix be `apply_safe=True` — so an AI suggestion is a human-reviewed note by construction, not a patch the tool will silently write (contract §7, D12/D18). The layer is bounded and resilient: it only advises findings that don't already carry a deterministic fix (a dependency bump is already actionable — don't spend tokens second-guessing it), it caps calls at `ai.max_findings` (logging the overflow), it caps each response at `ai.max_tokens`, and every call is wrapped in a per-finding try/except so one bad response never sinks the rest or the scan. All AI traffic goes out through the **one HTTP choke point** and the **egress** allowlist (`api.anthropic.com`), exactly like OSV/registry traffic — proven by an integration test that both confirms the request reaches `api.anthropic.com` through the real gate and that a provider pointed at any other host raises `OutOfScopeError` *before* any network I/O. The provider is behind a small `Provider` ABC (`AnthropicProvider` is the only v1 implementation) so a second backend is a new class, not a rewrite.
+**Why:** An AI layer is the part of a security tool most likely to cause harm if built carelessly — it could leak the very secrets the scan found, hallucinate vulnerabilities that don't exist, or be steered into generating exploits. Every design choice here is a guard against one of those: feeding it *only* the redacted finding (not the source) means it cannot leak a secret it was never shown; forbidding invented facts and constraining it to one given finding keeps it from manufacturing findings; the MANUAL/`apply_safe=False` construction means even a perfect-looking AI patch still requires a human to apply it; and routing through the same egress gate as everything else means the AI cannot become a side channel to reach an arbitrary host. Off-by-default is the honest default for a feature that costs money, needs a key, and sends finding metadata to a third party — the user opts in explicitly. The result is a layer that can *only* make the deterministic findings easier to act on, and can never change what they are or what the tool does without one.
+
+---
+
+## Part 3 — Concepts Glossary (plain language)
+
+### Security-testing approaches
+- **SAST — Static Application Security Testing.** Reading the *source code* while it is NOT running, to spot dangerous patterns (like a password written directly into the code). "Static" = the app is standing still.
+- **DAST — Dynamic Application Security Testing.** Poking a *running* website from the outside and watching how it reacts. "Dynamic" = the app is live and moving.
+- **SCA — Software Composition Analysis.** Checking the *outside code your app depends on* (its libraries) against a database of known vulnerabilities. Most apps are mostly other people's code; SCA checks that borrowed code.
+- **Passive check.** Only observes; sends no attack-style input. Safe to run anywhere. Example: "Is this site using HTTPS?"
+- **Active check.** Sends crafted, attack-style input to see if the app is vulnerable. Can be disruptive; only for authorized targets. Example: submitting `'` to see if the database chokes.
+
+### The vulnerabilities this project cares about (short definitions)
+- **XSS (Cross-Site Scripting).** Tricking a site into running attacker-supplied code in another visitor's browser.
+- **SQL Injection (SQLi).** Feeding a form field special text that changes the database query behind it, letting an attacker read or alter data.
+- **Open Redirect.** A link on a trusted site that silently bounces the visitor to an attacker's site.
+- **Path/Directory Traversal.** Tricking a server into serving files it shouldn't (like reading system files).
+- **SSRF (Server-Side Request Forgery).** Tricking the *server* into making requests on the attacker's behalf, often to reach internal systems. *(future scope)*
+- **CSRF (Cross-Site Request Forgery).** Tricking a logged-in user's browser into performing an action they didn't intend. *(future scope)*
+- **IDOR (Insecure Direct Object Reference).** Changing an ID in a request to access someone else's data (e.g., `/invoice/123` → `/invoice/124`). *(future scope)*
+- **Broken auth / session weaknesses.** Flaws in how login and "who is logged in" are handled. *(future scope)*
+- **Privilege escalation / broken role checks.** A normal user being able to do admin-only things. *(future scope)*
+- **Exposed sensitive files.** Files that should be private accidentally left reachable (like `.git`, `.env`, or backups).
+- **Security misconfiguration.** The software is fine, but it's set up unsafely (missing security headers, default passwords, verbose error pages).
+- **Vulnerable dependency.** A library the app uses has a publicly known security hole.
+
+### Web-scanning building blocks
+- **Crawler.** A component that starts at one page and follows links/forms to discover the rest of a site — building the map of what there is to check.
+- **Fingerprinting.** Guessing what technology a site runs (server, framework, versions) from clues it leaks.
+- **Security headers.** Special instructions a server sends the browser to make things safer (e.g., `Content-Security-Policy`). Missing ones are a common weakness. The passive scanner checks the common ones:
+  - **HSTS (`Strict-Transport-Security`).** Tells the browser "always use HTTPS for this site," so an attacker can't quietly downgrade a visitor to unencrypted HTTP.
+  - **CSP (`Content-Security-Policy`).** A allowlist of where scripts/styles/frames may come from; the single strongest defence against cross-site scripting (XSS).
+  - **Clickjacking protection (`X-Frame-Options` / CSP `frame-ancestors`).** Stops other sites from invisibly embedding this page in a frame to trick users into clicking things.
+  - **MIME-sniffing protection (`X-Content-Type-Options: nosniff`).** Stops the browser from second-guessing a file's type and, e.g., running an uploaded image as a script.
+  - **`Referrer-Policy`.** Limits how much of the current URL is leaked to other sites the user navigates to.
+- **Cookie flags.** Small safety switches on a cookie: **`Secure`** (only sent over HTTPS), **`HttpOnly`** (JavaScript can't read it, blunting XSS theft), **`SameSite`** (not sent on cross-site requests, blunting CSRF). Missing ones are a common, low-effort weakness.
+- **TLS/certificate inspection.** Checking that the site's encryption (the padlock) is set up correctly and not expired or weak. We read the certificate *without* verifying it (so we can still inspect a broken one) and judge it ourselves: expired, not-yet-valid, weak protocol (old SSL/TLS versions), or **self-signed** (issued by itself rather than a trusted authority, so browsers can't vouch for it).
+- **Scope / allowlist.** The explicit list of what the scanner is *allowed* to touch. Anything outside is refused.
+- **Rate limiting.** Deliberately slowing down how fast the scanner sends requests, so it doesn't overwhelm the target.
+
+### Code-scanning (SAST) building blocks
+- **Pattern SAST vs. dataflow/taint.** *Pattern* SAST (what v1 does) flags source lines that *match a known-dangerous shape* — it says "this pattern is here." *Dataflow/taint* analysis tracks whether attacker-controlled input can actually *reach* a dangerous spot — "this is exploitable." The latter is far more work and is deferred; v1 is honest that a match is a candidate for human review, not a proof. (See D39.)
+- **Sink.** A dangerous destination for data — a function or construct that can cause harm if it receives untrusted input (e.g. `eval`, `pickle.loads`, `subprocess(shell=True)`). SAST's `sast.sink.*` rules flag these. (See D39.)
+- **Rule pack.** The curated list of patterns SAST looks for, each with its own regex, the file types it applies to, a severity/confidence, and remediation advice. Adding a check means adding one rule, not rewiring the scanner. (See D39.)
+- **Redaction (of secrets).** When SAST finds a hardcoded credential, it *masks* the value (`AKIA****************`) and never puts the raw source line in the finding — so the tool that hunts secrets can't itself become the place they leak. Masking happens where the finding is built, not later. (See D39, D10.)
+- **Shannon entropy.** A measure of how "random-looking" a string is (bits per character). A real API key looks random (high entropy); a placeholder like `"password"` does not. The generic-secret rule uses an entropy floor to avoid flagging obvious non-secrets. (See D39.)
+- **Precision guard.** A rule refinement that suppresses a known false positive *before* a finding is created — e.g. skipping `yaml.load(..., Loader=SafeLoader)` (a "negate" pattern), not matching `literal_eval` for the `eval` rule (a lookbehind), or ignoring `your-api-key-here` (a placeholder filter). Guards are what keep a pattern scanner from becoming noise people ignore. (See D39.)
+
+### AI advisor building blocks
+- **AI advisor.** The optional final layer that runs *after* the deterministic scan and, for each finding, asks a language model to explain the risk in plain terms and suggest concrete remediation. It never scans, never fetches, and never finds anything itself — it only makes the findings the scanners already produced easier to act on. Off unless you both enable it and provide an API key. (See D40, D10, D11.)
+- **Reasons only over findings.** The rule that the model is fed *only* a finding's own fields (title, severity, location, the already-redacted evidence, references) — never the raw source code, never the live target, never a fresh request. This is why the AI can't leak a secret (it was never shown it) or invent a vulnerability (it's pinned to one given finding). (See D40, D9.)
+- **Provider abstraction.** A small interface (`Provider`) that hides *which* AI backend is used behind one `complete(...)` call. v1 ships one implementation (Anthropic Claude); swapping or adding a backend is a new class, not a change to the advisor. (See D40, D17.)
+- **MANUAL fix / advisory remediation.** The kind of "fix" the AI attaches: a human-readable note, explicitly marked *not* auto-applyable (`apply_safe=False`). The Finding model itself refuses to let this kind be auto-applied, so AI advice is always something a person reads and applies — never a patch the tool writes on its own. (See D40, D12, D18.)
+- **Egress-gated AI call.** AI requests leave through the *same* single HTTP choke point and egress allowlist (`api.anthropic.com`) as every other outbound call — so the AI layer can't be turned into a back door to reach an arbitrary host; a request anywhere else is refused before it's sent. (See D40, D22, D33.)
+
+### Other terms
+- **Finding.** One security issue the tool discovered, packaged in a standard format (see D7 and Part 4).
+- **Severity.** How bad a finding is: Critical, High, Medium, Low, or Info.
+- **Confidence.** How sure we are it's real: Confirmed, Firm, or Tentative.
+- **Remediation.** The recommended fix for a finding.
+- **False positive.** The tool reports a problem that isn't actually a problem. Reducing these is a big part of quality.
+- **OSV.** A free public database of known vulnerabilities in software libraries; the SCA scanner asks it which of your dependencies are affected. (See D32.)
+- **CWE / CVE / OWASP.** Standard reference systems for describing weaknesses (CWE = types of weaknesses, CVE = specific known vulnerabilities, OWASP = a well-known security org and its "top risks" lists). Findings link to these.
+- **Scope vs. Egress allowlist.** *Scope* is the list of hosts we're allowed to scan/attack (the target). *Egress allowlist* is a separate list of our own service hosts — the vulnerability database, package registries, the AI API — that we call for data but never scan. Keeping them separate stops the target boundary from accidentally blocking our own tools. (See D22.)
+- **Fingerprint (of a finding).** A short, stable ID computed from a finding's rule and location, used to spot and remove duplicates when two scanners report the same issue. (See D20.)
+- **Injection point.** A single place an active check can put test input — one parameter of one request (e.g. the `q` field of a search form). The active DAST tier turns discovered pages/forms into a list of these.
+- **Crawler→active bridge.** The step that turns the crawler's map (pages and forms) into a flat list of injection points — one per parameter — carrying every sibling field along at its captured value so the app still routes and validates the request. It's the seam between the *passive* crawl and the *active* checks. (See D38.)
+- **Detection-only payload.** Test input crafted to *reveal* a flaw without *exploiting* it: a single quote to provoke a database error, an inert marker string, a harmless redirect URL. Never a working attack (no `OR 1=1`, no runnable script, no data access). The whole active tier is built from these. (See D8, D38.)
+- **Sentinel host.** A harmless, reserved domain (`example.org`) used as the redirect target when testing for open redirects: if the server bounces us *to that host*, the redirect is attacker-controllable — and because the host is inert, nothing bad happens even on a live site. (See D38.)
+- **Baseline comparison.** Sending an untampered request first, then the probe, and reporting only what *changed*. The SQLi check uses it to avoid blaming input for a database error the page shows regardless — a key false-positive guard. (See D38.)
+- **Request budget.** A hard cap (`dast.active.max_requests`) on how many active-check requests a scan may send, so a large site can't turn into a flood. Reaching it stops further checks and logs how many were skipped — never a silent partial scan. (See D38, and rate limiting above.)
+- **Fault isolation.** Running each check so that if it crashes, the crash is caught and recorded as a "scan error" and the rest of the scan keeps going. (See D13, D26.)
+- **Soft-404.** A page that says "not found" in its text but still returns a success (200) status. The exposed-file check calibrates against these so it doesn't report a file as "present" when the server is really just showing a friendly error.
+- **Exit code.** The single number a command hands back to whatever ran it. Automation (like a CI pipeline) reads it to decide pass/fail. Ours: `0` clean, `1` a finding met the threshold, `2` the scan broke. (See D31.)
+- **Severity threshold.** The line above which a finding is serious enough to *fail* the run (exit 1). Findings below it are still reported; they just don't fail the build. Default: medium.
+- **Target autodetection.** How the CLI decides whether the thing you typed is a website or a code folder: an `http(s)://` prefix or a bare domain is a website; an existing path is code. Saves you from having to say which. (See D31.)
+- **Adversarial review.** Deliberately trying to break your own work — and independently double-checking each claimed flaw before trusting it — instead of just confirming it looks right. Applied to the core before any scanner was built on it. (See D29.)
+- **Manifest vs. lockfile.** A *manifest* is the file where you declare what your app depends on (`requirements.txt`, `pyproject.toml`, `package.json`). A *lockfile* (`package-lock.json`) additionally records the exact resolved version of every transitive dependency. SCA reads both; only exactly-pinned versions can be checked. (See D32.)
+- **CVSS.** The industry-standard way to score how severe a vulnerability is, from 0 to 10, computed from a short "vector" string describing the attack (how it's reached, how hard it is, what it damages). We compute the base score from the vector ourselves so severities are accurate rather than a guess. (See D32.)
+- **Batch query (OSV querybatch).** Asking about many dependencies in a single request — send all the (package, version) pairs at once, get back the list of vulnerability IDs for each — instead of one slow request per dependency. (See D32.)
+- **Alias cluster.** The same real vulnerability often exists in OSV under several IDs (a GitHub `GHSA-…`, a Python `PYSEC-…`, and a `CVE-…`) that list each other as aliases. Grouping these and reporting the issue once — instead of two or three times — is "alias de-duplication." (See D34.)
+- **Dependency bump.** Raising a library to a newer, fixed version. It's the one code-adjacent fix the tool is allowed to mark auto-applicable, because it doesn't rewrite your logic. (See D12, D32.)
+- **Fix boundary / pre-release.** The earliest version in which a fix first shipped — sometimes a beta like `5.2b1`. We recommend it "or later," which covers the eventual stable release. (See D35.)
+
+---
+
+## Part 4 — Architectural Patterns
+
+Plain explanations of *how the code is organized* and why.
+
+- **Thin core + plugins.** A small, stable center (the "core") plus many small interchangeable pieces (the "scanners" and "checks") that plug into it. Adding a new check means writing one small piece, not editing the center.
+- **Plugin registry.** A sign-up sheet: each check registers itself, and the engine runs whatever has signed up. Lets us add checks without rewiring the engine.
+- **Normalized data model (the Finding).** Everything, no matter the source, is converted into one shared shape early. Downstream code only ever handles that one shape.
+- **Engine / orchestration.** One coordinator that decides which scanners apply to a given target, runs them, gathers results, removes duplicates, and hands them to reporting.
+- **Provider abstraction (for the AI).** The AI is accessed through a generic "ask the AI" interface, so the actual AI service behind it can be swapped without touching the rest of the code.
+- **Optional-by-default enhancement layer.** The AI is layered on top such that its absence changes nothing about the core tool working.
+- **Per-item isolation / fault tolerance.** Each check runs in a way that its failure is caught and recorded, never crashing its neighbors or the whole scan.
+- **Asynchronous I/O.** The tool can wait on many network responses at the same time instead of one-by-one, making network-heavy scans much faster.
+- **Reporting as a separate layer with multiple renderers.** The same findings can be printed to the terminal, saved as JSON (for machines), or as HTML (for humans) — without the scanners knowing or caring.
+- **Guardrails in the foundation.** Safety rules (scope, active-off-by-default, rate limits) are enforced centrally, so no individual check can accidentally bypass them.
+
+---
+
+## Part 5 — Business Logic Domains
+
+The distinct "areas of responsibility" in the project. Thinking of them separately keeps the code focused.
+
+- **Target & Scope domain.** What are we scanning (a live URL, a code folder, or both) and what are we allowed to touch.
+- **Discovery domain.** Finding out what actually exists to be checked (crawling a site; listing dependencies; walking source files).
+- **Detection domain.** The actual security checks — split into SCA, DAST, and SAST families.
+- **Findings domain.** Collecting, de-duplicating, scoring (severity/confidence), and storing what was found.
+- **Remediation domain.** Turning a finding into advice, and — for safe cases — into an applied fix.
+- **Reporting domain.** Presenting findings to people and machines in different formats.
+- **Safety & Authorization domain.** Enforcing scope, consent for intrusive checks, and rate limits.
+- **AI Advisory domain.** Explaining findings and proposing/confirming fixes, on top of everything else.
+
+---
+
+*(Append new decisions and concepts below as the project develops.)*
