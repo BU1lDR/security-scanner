@@ -6,10 +6,25 @@ extension matches. A hit becomes a FILE-located finding on that line number.
 
 Two invariants matter here:
 
-- **Secrets are redacted at construction.** For a ``redact`` rule the evidence is
-  built from :func:`~scanner.scanners.sast.rules.redact` on the matched value and
-  the source line is *never* used — so a credential cannot leak into a report or
-  log (contract §4). For a non-secret sink, the code line itself is the evidence.
+- **Secrets are redacted at construction** (contract §4). For a ``redact`` rule
+  the evidence is built from :func:`~scanner.core.redaction.redact` on the matched
+  value and the source line is *never* used. For a non-secret sink the code line
+  itself is the evidence — that is what makes a sink finding actionable — but the
+  line is passed through :func:`~scanner.core.redaction.scrub` first.
+
+  That scrub is not belt-and-braces, it closes a real hole. Redaction is decided
+  per rule, while *every* rule is tried against *every* line, so one line can
+  raise two findings at once: a secret rule that masks the credential and a sink
+  rule that quotes the line containing it. ``os.system`` and ``shell=True`` lines
+  are exactly where an inline curl auth header or database password shows up, so
+  the pairing is routine rather than contrived. Scrubbing happens *before*
+  truncation on purpose — slicing first would leave the tail of a token in place
+  and no longer matching any shape.
+
+  The limit is worth stating plainly: ``scrub`` knows fixed-format token families,
+  so ``os.system("mysql -u root -pHunter2")`` still shows that password. A
+  shapeless credential in a quoted line is a residual exposure of showing source
+  at all, not something this layer can promise away.
 - **Precision guards run before a finding is created**: a ``negate`` pattern
   suppresses the line (e.g. a safe loader), and secret rules additionally require
   the value to clear an entropy floor and not look like a placeholder.
@@ -21,6 +36,7 @@ from pathlib import PurePath
 
 from scanner.core.finding import Confidence, Finding
 from scanner.core.location import Location
+from scanner.core.redaction import scrub
 from scanner.scanners.sast.rules import (
     RULES,
     Rule,
@@ -85,7 +101,9 @@ def _match_line(rule: Rule, line: str, path: str, lineno: int) -> Finding | None
                 return None
         evidence = f"{rule.title}: {redact(value)} (value redacted, line {lineno})"
     else:
-        evidence = f"{rule.title} at line {lineno}: {line.strip()[:200]}"
+        # scrub before slicing: a token cut in half is still leaked, and the
+        # remaining fragment no longer matches any shape (see module docstring).
+        evidence = f"{rule.title} at line {lineno}: {scrub(line.strip())[:200]}"
 
     return Finding(
         rule_id=rule.rule_id,
@@ -93,7 +111,7 @@ def _match_line(rule: Rule, line: str, path: str, lineno: int) -> Finding | None
         severity=rule.severity,
         confidence=rule.confidence,
         location=Location.for_file(path, line=lineno),
-        evidence=evidence[:500],
+        evidence=evidence,  # Finding caps and scrubs it (EVIDENCE_MAX_LEN)
         remediation=rule.remediation,
         scanner="sast",
         references=list(rule.references),

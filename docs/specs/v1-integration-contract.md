@@ -132,7 +132,8 @@ class Finding:
     severity: Severity
     confidence: Confidence
     location: Location
-    evidence: str           # human-readable, ALREADY redacted + truncated (§9)
+    evidence: str           # human-readable, ALREADY redacted by the caller;
+                            # __post_init__ also scrubs + caps it (§4)
     remediation: str
     scanner: str            # id of the emitting scanner (§6): sca|dast|dast-active|sast
     references: list[str] = []      # "CWE-79", "CVE-2024-...", OWASP ids, URLs
@@ -149,7 +150,11 @@ Decisions baked in here (resolving the three-way schism):
   structured location fields; a bare string can't carry them.)
 - **`evidence` is a plain string**, not a dict. Scanners assemble their own
   human-readable, redacted evidence text. (Keeps reporting trivial and avoids a
-  fourth mini-schema per scanner.)
+  fourth mini-schema per scanner.) The obligation on the scanner is unchanged, but
+  it is no longer the only thing standing between a target's bytes and a report:
+  `Finding.__post_init__` scrubs recognisable credentials and caps the string at
+  `EVIDENCE_MAX_LEN` (500), because "every caller remembers" turned out to be false
+  in practice — see decisions.md D44.
 - **`references` is `list[str]`**, not a structured `Reference` type. Plain
   identifier strings are enough for v1. (Matches the built code; the structured
   Reference type from the core prose is dropped.)

@@ -14,7 +14,50 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from scanner.core.fix import Fix
 from scanner.core.location import Location, LocationKind
+from scanner.core.redaction import scrub
 from scanner.core.rule_id import validate as _validate_rule_id
+
+#: Hard ceiling on ``Finding.evidence``, applied by the dataclass itself.
+#: 500 is not arbitrary: it is what every call site that *did* truncate already
+#: chose, so adopting it as the boundary changes nothing for them and only binds
+#: the three passive DAST checks that truncated nowhere.
+EVIDENCE_MAX_LEN = 500
+
+#: Truncation is visible on purpose. A silently shortened string reads like
+#: complete evidence, which is how someone concludes a scan found less than it did.
+_TRUNCATION_MARKER = "... (truncated)"
+
+
+def _bounded_evidence(evidence: str) -> str:
+    """Scrub then truncate — the two halves of the ``evidence`` contract.
+
+    **Why here and not at the call sites.** The contract used to be documented on
+    the field and enforced nowhere, so eight call sites each answered it
+    independently and gave four different answers. One of them was wrong in a way
+    that leaked target data into reports and into ``--ai`` request bodies. Putting
+    it in ``__post_init__`` mirrors :class:`~scanner.core.fix.Fix`, which enforces
+    its ``apply_safe`` invariant in the dataclass rather than trusting callers, and
+    means a check added later cannot reintroduce the same defect by omission.
+
+    **Why it truncates instead of raising.** ``Fix`` raises, correctly: a bad
+    ``apply_safe`` means *our* code is wrong. Evidence length is chosen by whatever
+    a target sent back, and killing a scan because a server was verbose would turn
+    a cosmetic problem into a denial of service against the operator.
+
+    **Why scrub comes first.** :func:`~scanner.core.redaction.redact` is
+    length-preserving, so the order does not change the result's size — it changes
+    whether a token straddling the cut survives. Truncate first and the token's
+    head stays in the report in plaintext, as a fragment that no longer matches any
+    shape and so can never be scrubbed afterwards.
+
+    **What this is not.** A net, not a licence. ``scrub`` knows fixed-format token
+    families only; it cannot recognise a password, a session id or an email. Call
+    sites still owe it a string that was safe to begin with.
+    """
+    evidence = scrub(evidence)
+    if len(evidence) <= EVIDENCE_MAX_LEN:
+        return evidence
+    return evidence[: EVIDENCE_MAX_LEN - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 
 class Severity(IntEnum):
@@ -63,9 +106,14 @@ def _normalize_url(url: str | None) -> str:
 class Finding:
     """A single security issue discovered by a scanner.
 
-    ``location`` is structured (URL / file / dependency). ``evidence`` is a
-    human-readable string that must already be redacted and truncated at
-    construction — raw secrets or cookie values never reach a Finding.
+    ``location`` is structured (URL / file / dependency). ``evidence`` **must
+    already be redacted and truncated by the caller** — that obligation is
+    unchanged. ``__post_init__`` additionally scrubs recognisable credentials and
+    caps the length, but that is a backstop with a deliberately narrow reach and
+    is *not* a substitute for the caller's duty: it sees only ``evidence``, while
+    ``title``, ``remediation`` and ``location`` are equally exposed (all four are
+    written to reports and sent to the AI provider), and it runs once at
+    construction, so later mutation bypasses it entirely.
     ``references`` collects external identifiers (CWE/CVE/OWASP/URLs).
     ``scanner`` is the id of the emitting scanner. ``fix`` is an optional
     structured remediation; it stays ``None`` when there is no machine-usable fix.
@@ -86,6 +134,7 @@ class Finding:
         # Enforce the rule_id grammar at emit/construction time (contract §5),
         # matching the invariant checks the sibling Fix and Target dataclasses do.
         _validate_rule_id(self.rule_id)
+        self.evidence = _bounded_evidence(self.evidence)
 
     @property
     def fingerprint(self) -> str:

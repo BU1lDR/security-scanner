@@ -48,6 +48,34 @@ def test_secret_is_redacted_and_raw_value_never_leaks():
     assert "*" in hit[0].evidence
 
 
+def test_sink_rule_does_not_reprint_a_secret_the_secret_rule_redacted():
+    """Redaction is per-rule, but a line is matched by *every* rule.
+
+    ``_match_line`` decides to redact from ``rule.redact``, and all eleven sink
+    rules set it to ``False`` because a line of code is normally safe to quote.
+    But the matcher tries every applicable rule against every line, so one line
+    can produce two findings that contradict each other: the secret rule masks
+    the credential, and a sink rule on the same line prints it in full. The
+    report then contains both.
+
+    This is not a contrived pairing. ``os.system`` and ``shell=True`` lines are
+    exactly where people inline a curl command with an auth header or a database
+    password, which is why those rules exist at all.
+    """
+    token = "ghp_" + "a" * 36
+    text = f"""os.system(f"curl -H 'Authorization: Bearer {token}' {{url}}")\n"""
+
+    findings = scan_text(text, path="deploy.py")
+
+    ids = _ids(findings)
+    assert "sast.secret.github-token" in ids, "the secret rule should still fire"
+    assert "sast.sink.python-os-system" in ids, "the sink rule should still fire"
+    for f in findings:
+        assert token not in f.evidence, (
+            f"{f.rule_id} leaked the token the secret rule redacted: {f.evidence!r}"
+        )
+
+
 def test_generic_key_requires_entropy():
     low = scan_text("password = 'aaaaaaaaaaaaaa'\n", path="c.py")   # low entropy
     high = scan_text("password = 'Gh7$kP2mQx9!zLw0'\n", path="c.py")  # random-looking

@@ -184,7 +184,7 @@ class ScaScanner(Scanner):
         evidence = f"{dep.name} {dep.version} ({dep.ecosystem}) is affected by {rep.id}"
         if other_ids:
             evidence += f" (aka {', '.join(other_ids)})"
-        evidence = evidence[:500]
+        evidence = evidence[:500]  # the caller's own cap; Finding's is a backstop
 
         if fixed:
             remediation = f"Upgrade {dep.name} to {fixed} or later."
