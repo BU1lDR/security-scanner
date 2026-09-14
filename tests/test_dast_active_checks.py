@@ -106,6 +106,45 @@ def test_no_sqli_when_error_string_is_present_in_baseline_too():
     assert _run(check_sqli_error(_point(), _SqlHttp(always=True))) == []
 
 
+class _LeakySqlHttp:
+    """A debug page that prints the failing query alongside the error — common
+    on the misconfigured apps this check fires against."""
+
+    _ERROR = (
+        "PostgreSQL query failed: SELECT * FROM users WHERE email = "
+        "'alice@example.com' AND token = 'sk-live-abc123def456' -- ERROR: "
+        "syntax error at or near \"'\""
+    )
+
+    async def get(self, url, *, active=False, params=None, **kwargs):
+        val = dict(params or []).get("q", "")
+        if "'" in val:
+            return _Resp(f"<html>{self._ERROR}</html>")
+        return _Resp("<html>normal results</html>")
+
+
+def test_sqli_evidence_names_the_error_family_without_echoing_the_response():
+    """``Finding.evidence`` is contracted to be redacted at construction, but the
+    check used to embed the regex match verbatim — and one pattern
+    (``PostgreSQL.*ERROR``) is greedy, so it swallowed the whole line. A debug
+    page echoing its failing query therefore put that query's data into the
+    finding, and from there into report files on disk and the request body of an
+    ``--ai`` call. The 500-char truncation bounds the size but not the leak: the
+    first 500 chars are exactly where the query and its parameters are.
+
+    The user needs to know *which* database's error appeared to triage the
+    finding. They do not need the target's bytes to learn that."""
+    findings = _run(check_sqli_error(_point(), _LeakySqlHttp()))
+
+    assert len(findings) == 1
+    evidence = findings[0].evidence
+    # Nothing lifted out of the response body.
+    for secret in ("alice@example.com", "sk-live-abc123def456", "SELECT", "users"):
+        assert secret not in evidence, f"evidence leaked {secret!r}: {evidence!r}"
+    # But still says which engine complained, so the finding is triageable.
+    assert "PostgreSQL" in evidence
+
+
 # --- open redirect -----------------------------------------------------------
 
 class _RedirectHttp:

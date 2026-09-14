@@ -41,36 +41,71 @@ _XSS_SIGNATURE = f"<{_XSS_MARKER}>"
 
 # --- error-based SQLi --------------------------------------------------------
 _SQLI_PROBE = "'"
-_SQL_ERROR = re.compile(
-    "|".join(
-        [
+
+# Signatures grouped by database engine, so a finding can say *which* engine
+# complained without quoting the response back.
+#
+# The grouping is a redaction measure, not cosmetics. `Finding.evidence` must be
+# redacted at construction, and echoing the matched text cannot satisfy that: the
+# pages this check fires on are precisely the ones that print their failing query,
+# so the match may carry that query's own data — an email, a session id, an API
+# token — into the report, and from there onto disk and into an `--ai` request.
+# Some signatures are also unbounded (`PostgreSQL.*ERROR` spans a whole line), so
+# truncation limits the size of such a leak without preventing it.
+#
+# Order matters: specific engines first, the generic signatures last.
+_SQL_ERRORS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (label, re.compile("|".join(patterns), re.IGNORECASE))
+    for label, patterns in (
+        ("MySQL", [
             r"You have an error in your SQL syntax",
             r"check the manual that corresponds to your (?:MySQL|MariaDB)",
             r"MySqlException",
             r"MySQLSyntaxErrorException",
             r"valid MySQL result",
+        ]),
+        ("PostgreSQL", [
             r"PostgreSQL.*ERROR",
             r"org\.postgresql\.util\.PSQLException",
             r"PG::(?:Syntax|Undefined|Grouping)Error",
             r"syntax error at or near",
             r"unterminated quoted string",
+        ]),
+        ("SQL Server", [
             r"Unclosed quotation mark after the character string",
             r"Incorrect syntax near",
             r"System\.Data\.SqlClient\.SqlException",
             r"com\.microsoft\.sqlserver\.jdbc",
+        ]),
+        ("Oracle", [
             r"ORA-[0-9]{5}",
             r"quoted string not properly terminated",
             r"SQL command not properly ended",
+        ]),
+        ("SQLite", [
             r"sqlite3?\.(?:Operational|Programming)Error",
             r"org\.sqlite\.JDBC",
             r"unrecognized token",
             r"SQL logic error",
+        ]),
+        ("generic SQL", [
             r"java\.sql\.SQLException",
             r"\[SQLSTATE\]|SQLSTATE\[",
-        ]
-    ),
-    re.IGNORECASE,
+        ]),
+    )
 )
+
+
+def _sql_error_family(body: str) -> str | None:
+    """Which database engine's error signature appears in ``body``, if any.
+
+    Returns the engine's name and never a slice of ``body`` — that is the whole
+    point of this helper (see the note above ``_SQL_ERRORS``).
+    """
+    for label, pattern in _SQL_ERRORS:
+        if pattern.search(body):
+            return label
+    return None
 
 # --- open redirect -----------------------------------------------------------
 _REDIRECT_HINT = re.compile(
@@ -125,7 +160,7 @@ def _finding(rule_id: str, title: str, severity: Severity, point, evidence: str,
         severity=severity,
         confidence=Confidence.FIRM,
         location=Location.for_url(point.url, method=point.method, param=point.param),
-        evidence=evidence[:500],
+        evidence=evidence,  # Finding caps and scrubs it (EVIDENCE_MAX_LEN)
         remediation=remediation,
         scanner="dast-active",
         references=references,
@@ -154,20 +189,20 @@ async def check_xss_reflected(point, http) -> list[Finding]:
 
 async def check_sqli_error(point, http) -> list[Finding]:
     baseline = await _baseline(http, point)
-    if _SQL_ERROR.search(_body(baseline)):
+    if _sql_error_family(_body(baseline)):
         return []  # page emits a DB error regardless of input; can't attribute it
     resp = await _send(http, point, _original(point) + _SQLI_PROBE)
-    match = _SQL_ERROR.search(_body(resp))
-    if not match:
+    family = _sql_error_family(_body(resp))
+    if not family:
         return []
     return [
         _finding(
             "dast.active.sqli-error",
             "SQL injection (database error triggered)",
             Severity.HIGH, point,
-            f"Appending a single quote to '{point.param}' produced a database "
-            f"error that the untampered request did not ({match.group(0)!r}), "
-            "indicating the value reaches an SQL query unsanitized.",
+            f"Appending a single quote to '{point.param}' produced a {family} "
+            "database error that the untampered request did not, indicating the "
+            "value reaches an SQL query unsanitized.",
             "Use parameterized queries / prepared statements; never build SQL by "
             "string concatenation. Validate and least-privilege the DB account.",
             [_WSTG, "CWE-89"],
