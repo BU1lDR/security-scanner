@@ -8,8 +8,12 @@ budget). Anything the gate refuses raises :class:`OutOfScopeError` **before any
 network I/O happens**.
 
 Scanners must use only ``ctx.http``; opening a private ``httpx`` client (or a raw
-socket that skips this gate) is forbidden. The one sanctioned raw-socket path is
-the TLS probe, which reuses ``self.gate`` to apply the same scope check (§9).
+socket that skips this gate) is forbidden. There is exactly one sanctioned
+raw-socket path — the certificate probe in ``scanner.scanners.dast.tls``, which
+needs a handshake httpx will not expose — and it is not an exemption from the
+rule: it is handed this client's :attr:`gate` and must authorize through it before
+connecting, on *stricter* terms than a request made here (an in-scope target host
+only, never an infrastructure egress host). See §9 and decisions.md D45.
 """
 
 from __future__ import annotations

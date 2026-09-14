@@ -1,14 +1,20 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from scanner.core.egress import Egress
 from scanner.core.finding import Severity
+from scanner.core.gate import OutOfScopeError, RequestGate
 from scanner.core.location import LocationKind
 from scanner.core.rule_id import is_valid
-from scanner.scanners.dast.tls import analyze_tls
+from scanner.core.scope import Scope
+from scanner.scanners.dast import tls as tls_module
+from scanner.scanners.dast.tls import analyze_tls, fetch_tls
 
 _KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -68,3 +74,91 @@ def test_self_signed_certificate_is_flagged():
                  cn="example.com", issuer_cn="example.com")
     ids = _ids(analyze_tls("https://example.com/", cert, "TLSv1.3", _NOW))
     assert "dast.tls.self-signed" in ids
+
+
+# --- the raw-socket path is gated too (contract §9) --------------------------
+#
+# fetch_tls is the one place in the tool that opens a socket without going
+# through AsyncHttpClient, so it is the one place the scope check can be missed.
+# It was: the probe took a URL and a timeout and nothing else, while
+# core/http.py claimed it "reuses self.gate to apply the same scope check".
+
+
+def _gate(*hosts):
+    return RequestGate(Scope(allowed_hosts=set(hosts)), Egress())
+
+
+def _tripwire(*args, **kwargs):
+    raise AssertionError("a TLS socket was opened without authorization")
+
+
+def test_fetch_tls_cannot_be_called_without_a_gate():
+    """The gate is required *positionally*, so forgetting it is a TypeError.
+
+    An optional gate would be no guarantee at all: the next caller reintroduces
+    the ungated socket by omission, and the omission looks like ordinary code.
+    """
+    with pytest.raises(TypeError):
+        fetch_tls("https://example.com/")
+
+
+def test_an_out_of_scope_host_is_refused_before_any_socket_is_opened(monkeypatch):
+    monkeypatch.setattr(tls_module, "_fetch_blocking", _tripwire)
+    with pytest.raises(OutOfScopeError):
+        asyncio.run(fetch_tls("https://not-the-target.example/", _gate("target.example")))
+
+
+def test_an_egress_host_is_refused_even_though_an_http_request_there_is_allowed(monkeypatch):
+    """Stricter than the ordinary passive rule, on purpose.
+
+    ``gate.authorize`` *permits* api.anthropic.com — passive traffic to tool
+    infrastructure is how the AI advisor works. But §9 allows this raw-socket
+    path "only to a host already in Scope", and the tool has no business
+    handshaking with its own providers, so EGRESS is not good enough here.
+    """
+    monkeypatch.setattr(tls_module, "_fetch_blocking", _tripwire)
+    gate = _gate("target.example")
+    assert gate.egress.allows("https://api.anthropic.com/") is True  # http would allow it
+    with pytest.raises(OutOfScopeError):
+        asyncio.run(fetch_tls("https://api.anthropic.com/", gate))
+
+
+def test_an_unreachable_in_scope_host_is_still_a_quiet_none(monkeypatch):
+    """The deliberate asymmetry: unreachable is quiet, unauthorized is loud.
+
+    A failed handshake is the target's business and simply means no TLS
+    findings. A scope refusal means *we* tried to touch something we were not
+    authorized to touch — our bug — so it must not be swallowed by the same
+    ``except Exception`` that absorbs connection failures.
+    """
+    def _boom(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(tls_module, "_fetch_blocking", _boom)
+    assert asyncio.run(fetch_tls("https://target.example/", _gate("target.example"))) is None
+
+
+def test_an_in_scope_host_is_probed_with_its_own_host_port_and_timeout(monkeypatch):
+    seen = {}
+
+    def _record(host, port, timeout):
+        seen.update(host=host, port=port, timeout=timeout)
+        return ("cert-sentinel", "TLSv1.3")
+
+    monkeypatch.setattr(tls_module, "_fetch_blocking", _record)
+    result = asyncio.run(
+        fetch_tls("https://target.example:8443/deep/path", _gate("target.example"), timeout=3.0)
+    )
+    assert result == ("cert-sentinel", "TLSv1.3")
+    assert seen == {"host": "target.example", "port": 8443, "timeout": 3.0}
+
+
+def test_a_non_https_url_is_skipped_without_needing_authorization(monkeypatch):
+    """Ordering check: "nothing to probe" is decided before authorization.
+
+    A plain-http target is not a TLS finding and not an error either, so it stays
+    a quiet ``None`` even under a deny-all scope. Nothing has been reached at
+    this point, so there is nothing to authorize.
+    """
+    monkeypatch.setattr(tls_module, "_fetch_blocking", _tripwire)
+    assert asyncio.run(fetch_tls("http://target.example/", _gate())) is None

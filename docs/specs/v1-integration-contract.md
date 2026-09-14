@@ -298,6 +298,15 @@ handshake, which can't go through httpx. It is allowed to open a socket **only t
 a host already in Scope**, must run via `asyncio.to_thread` (it's blocking), and
 must apply the same scope check first. This is the one sanctioned raw-socket path.
 
+How that is enforced, rather than merely required: `fetch_tls(url, gate, *, timeout)`
+takes the `RequestGate` as a **required positional argument**, so a caller that
+omits it gets a `TypeError` instead of an unguarded socket, and it accepts only a
+`RequestClass.TARGET` verdict — an `EGRESS` host is refused here even though
+`AsyncHttpClient` would allow an ordinary request to it. A refusal *raises*
+`OutOfScopeError` (surfacing as a `ScanError`); an unreachable host returns `None`.
+For two commits this paragraph was true of the contract and false of the code — see
+decisions.md D45.
+
 ---
 
 ## 10. ScanContext & fault isolation (frozen)

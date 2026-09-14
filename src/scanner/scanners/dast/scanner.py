@@ -63,7 +63,11 @@ class DastScanner(Scanner):
             return []
         if not url.lower().startswith("https://"):
             return []
-        result = await fetch_tls(url)
+        if ctx.http is None:
+            return []  # no client means no gate to authorize the raw socket through
+        # The probe skips the HTTP choke point, so it is handed that client's own
+        # gate and authorizes through it (contract §9). Same boundary, one owner.
+        result = await fetch_tls(url, ctx.http.gate)
         if result is None:
             return []
         cert, protocol = result

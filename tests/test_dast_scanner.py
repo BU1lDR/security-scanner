@@ -9,6 +9,9 @@ from cryptography.x509.oid import NameOID
 
 from scanner.core.config import Config
 from scanner.core.context import ScanContext
+from scanner.core.egress import Egress
+from scanner.core.gate import RequestGate
+from scanner.core.scope import Scope
 from scanner.core.target import Target
 from scanner.scanners.dast import scanner as dast_scanner
 from scanner.scanners.dast.scanner import DastScanner
@@ -59,6 +62,9 @@ class _FakeHttp:
         self.entry_resp = entry_resp
         self.by_path = by_path or {}
         self.raise_entry = raise_entry
+        # The real client carries the gate the TLS probe has to authorize through,
+        # so a double that omits it would hide the wiring this fake is here to test.
+        self.gate = RequestGate(Scope.from_url(entry_url), Egress())
 
     async def get(self, url, **kwargs):
         if url == self.entry_url:
@@ -125,12 +131,35 @@ def test_tls_findings_flow_through_when_enabled(monkeypatch):
     url = "https://example.com/"
     http = _FakeHttp(url, _Resp(200, headers={}))
 
-    async def fake_fetch(u, **kwargs):
+    async def fake_fetch(u, gate, **kwargs):
         return _expired_cert(), "TLSv1.3"
 
     monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
     ids = {f.rule_id for f in _collect(_ctx(url, http, tls=True))}
     assert "dast.tls.expired-cert" in ids
+
+
+def test_the_tls_probe_is_handed_the_http_clients_own_gate(monkeypatch):
+    """The wiring core/http.py already claimed existed.
+
+    A probe holding some *other* gate would enforce some other scope, which
+    defeats the point of there being a single boundary — so this asserts object
+    identity with the client's gate, not merely that a gate was passed.
+    """
+    url = "https://example.com/"
+    http = _FakeHttp(url, _Resp(200, headers={}))
+    seen = {}
+
+    async def fake_fetch(u, gate, **kwargs):
+        seen.update(url=u, gate=gate)
+        return _expired_cert(), "TLSv1.3"
+
+    monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
+    ctx = _ctx(url, http, tls=True)
+    _collect(ctx)
+    assert seen["url"] == url
+    assert seen["gate"] is http.gate
+    assert ctx.errors == []
 
 
 def test_disabled_scanner_yields_nothing():

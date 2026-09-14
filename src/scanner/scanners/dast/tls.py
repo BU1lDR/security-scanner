@@ -8,10 +8,18 @@ Two halves, kept apart so the logic is testable without a live server:
 - ``fetch_tls`` — thin I/O: open a TLS socket *without verification* (so we can
   still read an expired or self-signed cert), grab the peer certificate and the
   negotiated protocol version. Runs in a worker thread; exercised end-to-end.
+
+This module holds the **only** socket in the tool that does not go through
+:class:`~scanner.core.http.AsyncHttpClient`, because a certificate has to be read
+from a raw handshake that httpx will not expose. Being the only exception makes it
+the only place the scope boundary can be missed, so ``fetch_tls`` takes the
+:class:`~scanner.core.gate.RequestGate` as a *required* argument and authorizes
+through it before connecting (contract §9).
 """
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -19,6 +27,7 @@ from urllib.parse import urlsplit
 from cryptography import x509
 
 from scanner.core.finding import Confidence, Finding, Severity
+from scanner.core.gate import OutOfScopeError, RequestClass, RequestGate
 from scanner.core.location import Location
 
 _WEAK_PROTOCOLS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
@@ -104,17 +113,40 @@ def _fetch_blocking(host: str, port: int, timeout: float) -> tuple[x509.Certific
     return x509.load_der_x509_certificate(der), protocol
 
 
-async def fetch_tls(url: str, *, timeout: float = 15.0):
+async def fetch_tls(url: str, gate: RequestGate, *, timeout: float = 15.0):
     """Return ``(certificate, protocol)`` for ``url`` or ``None`` if unreachable.
+
+    ``gate`` is required, and required *positionally*, because this function
+    bypasses the HTTP choke point and therefore has to re-apply the same scope
+    decision itself. Making it optional would leave the guarantee resting on every
+    future caller remembering to pass it — the failure mode decisions.md D44 is
+    about — so omitting it is a ``TypeError`` rather than a silently ungated probe.
+
+    **Stricter than an ordinary request.** Only a *target* host qualifies. The gate
+    would also authorize an infrastructure host such as ``api.anthropic.com``,
+    since ordinary passive traffic there is how the AI advisor works — but §9
+    permits this raw-socket path "only to a host already in Scope", and the tool
+    has no business handshaking with its own providers.
+
+    **A refusal raises; an unreachable host returns ``None``.** The asymmetry is
+    deliberate. A failed handshake is the target's business and simply means no TLS
+    findings. A scope refusal means the scanner tried to touch something it was not
+    authorized to touch, which is *our* bug, and it must not be swallowed by the
+    same ``except`` that absorbs connection failures — it has to reach the report
+    via ``ctx.run_check`` instead of looking like a site that has no TLS.
 
     The blocking socket work runs in a worker thread so it never stalls the event
     loop. Only ``https`` URLs are probed.
     """
-    import asyncio
-
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
-        return None
+        return None  # nothing will be reached, so there is nothing to authorize
+    if gate.authorize(url) is not RequestClass.TARGET:
+        raise OutOfScopeError(
+            f"Refusing a raw TLS handshake with {url!r}: the certificate probe is "
+            "permitted only against an in-scope target host, never against the "
+            "tool's own infrastructure."
+        )
     port = parts.port or 443
     try:
         return await asyncio.to_thread(_fetch_blocking, parts.hostname, port, timeout)
