@@ -26,8 +26,9 @@ _GHSA = {
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -141,6 +142,25 @@ def test_osv_failure_is_fault_isolated(tmp_path):
     assert findings == []
     assert len(ctx.errors) == 1
     assert ctx.errors[0].scanner == "sca"
+
+
+def test_osv_error_response_is_reported_not_read_as_a_clean_project(tmp_path):
+    """The end of the chain that matters: an OSV error must reach the *user*.
+    Zero findings on its own is indistinguishable from a healthy project, so the
+    recorded error is the only thing that stops "OSV was down" from being read
+    as "nothing is vulnerable" (the report renders it under Errors)."""
+    (tmp_path / "requirements.txt").write_text("flask==2.0.1\n", encoding="utf-8")
+
+    class _Unavailable:
+        async def post(self, url, json=None):
+            return _Resp({"code": 14, "message": "upstream unavailable"}, status_code=503)
+
+    ctx = _ctx(tmp_path, _Unavailable())
+    findings = _collect(ScaScanner(), ctx)
+
+    assert findings == []
+    assert len(ctx.errors) == 1
+    assert "503" in ctx.errors[0].message
 
 
 @pytest.mark.parametrize(

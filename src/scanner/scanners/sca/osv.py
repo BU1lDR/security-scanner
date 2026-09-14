@@ -62,6 +62,40 @@ class Vulnerability:
         return ()
 
 
+def _payload(resp, what: str) -> dict:
+    """The JSON body of a successful OSV response, or raise.
+
+    OSV signals failure with a non-2xx status *and* a JSON body — a bad query
+    returns ``400 {"code":3,"message":"invalid ecosystem"}``. Reading that body
+    like a normal result gives ``{}``, which every caller below reads as *"no
+    vulnerabilities"*. So an outage, a rate limit or a malformed query would be
+    reported as a clean project: a silent false negative. Raising instead lets
+    ``ctx.run_check`` record a scan error the report actually shows (D13).
+
+    The check lives here rather than in the shared HTTP client on purpose: DAST
+    legitimately needs to see 4xx/5xx, since a status code is the *signal* for
+    checks like exposed-file probing.
+    """
+    if resp.status_code >= 400:
+        raise RuntimeError(f"OSV {what} failed: HTTP {resp.status_code}{_detail(resp)}")
+    return resp.json() or {}
+
+
+def _detail(resp) -> str:
+    """OSV's own error message, when the failure body is the JSON it usually is.
+
+    A proxy or gateway in front of the API may answer with an HTML page instead,
+    and a parse error there must not be raised over the top of the status code —
+    the status is the part worth reporting.
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    message = body.get("message") if isinstance(body, dict) else None
+    return f" - {message}" if message else ""
+
+
 def _parse_vuln(data: dict) -> Vulnerability:
     affected: list[Affected] = []
     for a in data.get("affected", []) or []:
@@ -114,7 +148,7 @@ class OsvClient:
             ]
         }
         resp = await self._http.post(_BATCH_URL, json=payload)
-        results = resp.json().get("results", []) or []
+        results = _payload(resp, "screening query").get("results", []) or []
 
         # Step 1 told us which packages are affected; we don't keep the ids,
         # because step 2 re-reads them as full records anyway.
@@ -140,4 +174,5 @@ class OsvClient:
                 "version": dep.version,
             },
         )
-        return [_parse_vuln(v) for v in (resp.json().get("vulns", []) or [])]
+        body = _payload(resp, f"lookup for {dep.name} {dep.version}")
+        return [_parse_vuln(v) for v in (body.get("vulns", []) or [])]

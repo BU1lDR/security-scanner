@@ -1,12 +1,15 @@
 import asyncio
 
+import pytest
+
 from scanner.scanners.sca.manifests import Dependency
 from scanner.scanners.sca.osv import OsvClient, Vulnerability, _parse_vuln
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -94,6 +97,62 @@ def test_costs_one_followup_query_per_affected_package_not_one_per_vulnerability
     assert len(result[django]) == 20         # all 20 still reported
     assert result[django][0].fixed_for("django", "PyPI") == ("2.2.28",)
     assert clean not in result
+
+
+def test_screening_error_status_raises_instead_of_reading_as_clean():
+    """OSV reports failure with a non-2xx code and a JSON error body — a bad
+    query really returns ``400 {"code":3,"message":"invalid ecosystem"}``. Read
+    that body as a normal result and ``.get("results")`` yields ``[]``, i.e.
+    *"nothing is vulnerable"*: an outage, a quota block or a malformed query
+    silently becomes a clean bill of health. For a vulnerability scanner that is
+    the worst failure mode there is, so it must raise and be recorded as a
+    visible scan error instead."""
+    dep = Dependency("PyPI", "flask", "2.0.1", "r.txt", 1)
+
+    class _Failing:
+        async def post(self, url, json=None):
+            return _Resp({"code": 3, "message": "invalid ecosystem"}, status_code=400)
+
+    with pytest.raises(RuntimeError, match="invalid ecosystem"):
+        asyncio.run(OsvClient(_Failing()).find_vulns([dep]))
+
+
+def test_detail_error_status_raises_instead_of_dropping_the_package():
+    """Screening can succeed and the follow-up detail query still fail — a rate
+    limit is likeliest exactly here, where we fan out. Swallowing it would drop
+    a package we already *know* is affected, which is worse than reporting
+    nothing at all."""
+    dep = Dependency("PyPI", "flask", "2.0.1", "r.txt", 1)
+
+    class _FailingDetail:
+        async def post(self, url, json=None):
+            if url.endswith("/querybatch"):
+                return _Resp({"results": [{"vulns": [{"id": "GHSA-x", "modified": "0"}]}]})
+            return _Resp({"code": 8, "message": "Quota exceeded"}, status_code=429)
+
+    with pytest.raises(RuntimeError, match="Quota exceeded"):
+        asyncio.run(OsvClient(_FailingDetail()).find_vulns([dep]))
+
+
+def test_non_json_error_body_still_reports_the_status():
+    """A gateway or proxy in front of OSV answers 502 with an HTML page, not
+    OSV's JSON error shape. Trying to read a message out of it must not throw a
+    parse error over the top of the status code — that's the part worth
+    reporting."""
+    dep = Dependency("PyPI", "flask", "2.0.1", "r.txt", 1)
+
+    class _Html:
+        async def post(self, url, json=None):
+            class _R:
+                status_code = 502
+
+                def json(self):
+                    raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+            return _R()
+
+    with pytest.raises(RuntimeError, match="502"):
+        asyncio.run(OsvClient(_Html()).find_vulns([dep]))
 
 
 def test_parse_vuln_extracts_core_fields():
