@@ -1,10 +1,25 @@
 """A thin async client for the OSV.dev vulnerability database (contract §9 egress).
 
 The scanner hands us a list of resolved dependencies; we ask OSV which are
-affected. We use the batch endpoint once for every pinned dependency, then fetch
-the full record for each distinct vulnerability id. All requests go through the
-shared HTTP client, so scope/egress enforcement and rate limiting still apply —
-``api.osv.dev`` is on the egress allowlist, never the target scope.
+affected, in two steps:
+
+1. **Screen** every pinned dependency in a single ``/v1/querybatch`` request.
+   That endpoint returns only ``id`` + ``modified`` per hit, which is all we
+   need to learn *which* packages are affected.
+2. **Detail** only those affected packages, one concurrent ``/v1/query`` each.
+   Unlike the batch endpoint, ``/v1/query`` returns *full* records, so a package
+   carrying forty advisories costs one request instead of forty.
+
+That keeps the cost at ``1 + (affected packages)`` requests. The obvious
+alternatives are both worse: fetching each advisory by id costs
+``1 + (distinct vulnerabilities)`` — ~180 requests for a handful of outdated
+packages, minutes of wall clock at the shared rate limit — while querying every
+package individually costs one request per dependency even when nothing is
+vulnerable, which punishes large healthy projects.
+
+All requests go through the shared HTTP client, so scope/egress enforcement and
+rate limiting still apply — ``api.osv.dev`` is on the egress allowlist, never
+the target scope.
 
 Only dependencies with an *exact* version are queried; an unpinned dependency
 has no single version to check.
@@ -12,12 +27,13 @@ has no single version to check.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from scanner.scanners.sca.manifests import Dependency
 
 _BATCH_URL = "https://api.osv.dev/v1/querybatch"
-_VULN_URL = "https://api.osv.dev/v1/vulns/"
+_QUERY_URL = "https://api.osv.dev/v1/query"
 
 
 @dataclass(frozen=True)
@@ -100,20 +116,28 @@ class OsvClient:
         resp = await self._http.post(_BATCH_URL, json=payload)
         results = resp.json().get("results", []) or []
 
-        ids_by_dep: dict[Dependency, list[str]] = {}
-        all_ids: set[str] = set()
-        for dep, result in zip(queryable, results):
-            ids = [v["id"] for v in ((result or {}).get("vulns", []) or [])]
-            if ids:
-                ids_by_dep[dep] = ids
-                all_ids.update(ids)
+        # Step 1 told us which packages are affected; we don't keep the ids,
+        # because step 2 re-reads them as full records anyway.
+        affected = [
+            dep
+            for dep, result in zip(queryable, results)
+            if ((result or {}).get("vulns") or [])
+        ]
+        if not affected:
+            return {}
 
-        details = {vid: await self._fetch(vid) for vid in sorted(all_ids)}
-        return {
-            dep: [details[i] for i in ids if i in details]
-            for dep, ids in ids_by_dep.items()
-        }
+        # Step 2: full records, one request per affected package, concurrently —
+        # the shared client's semaphore and rate limiter still pace them.
+        detailed = await asyncio.gather(*(self._query(dep) for dep in affected))
+        return {dep: vulns for dep, vulns in zip(affected, detailed) if vulns}
 
-    async def _fetch(self, vuln_id: str) -> Vulnerability:
-        resp = await self._http.get(_VULN_URL + vuln_id)
-        return _parse_vuln(resp.json())
+    async def _query(self, dep: Dependency) -> list[Vulnerability]:
+        """Full vulnerability records for one pinned dependency."""
+        resp = await self._http.post(
+            _QUERY_URL,
+            json={
+                "package": {"name": dep.name, "ecosystem": dep.ecosystem},
+                "version": dep.version,
+            },
+        )
+        return [_parse_vuln(v) for v in (resp.json().get("vulns", []) or [])]

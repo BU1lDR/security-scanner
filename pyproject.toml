@@ -9,13 +9,17 @@ description = "A unified SAST + DAST + SCA security scanner with an optional AI 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+# Deliberately no `anthropic` SDK: the AI provider talks to the API over the
+# shared httpx client so every request passes the one HTTP choke point and its
+# egress allowlist (decisions.md D40, contract §9). An SDK with its own
+# transport would bypass that gate, so it is not a dependency.
+# Deliberately no `lxml` either: the crawler parses with stdlib "html.parser"
+# (see scanners/dast/crawler.py), so the C-extension build was pure install cost.
 dependencies = [
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
-    "lxml>=5.2",
     "cryptography>=42",
     "packaging>=24",
-    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

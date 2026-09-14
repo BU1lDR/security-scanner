@@ -34,6 +34,9 @@ class _Resp:
 
 
 class _FakeHttp:
+    """Stands in for both OSV endpoints: ``/v1/querybatch`` screens (ids only)
+    and ``/v1/query`` returns the full records for one package."""
+
     def __init__(self, batch, vulns):
         self._batch = batch
         self._vulns = vulns
@@ -41,10 +44,21 @@ class _FakeHttp:
 
     async def post(self, url, json=None):
         self.posts.append((url, json))
-        return _Resp(self._batch)
-
-    async def get(self, url):
-        return _Resp(self._vulns[url.rsplit("/", 1)[-1]])
+        if url.endswith("/querybatch"):
+            return _Resp(self._batch)
+        name = json["package"]["name"]
+        return _Resp(
+            {
+                "vulns": [
+                    v
+                    for v in self._vulns.values()
+                    if any(
+                        a.get("package", {}).get("name") == name
+                        for a in v.get("affected", [])
+                    )
+                ]
+            }
+        )
 
 
 def _ctx(tmp_path, http):
