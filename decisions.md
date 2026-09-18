@@ -6,8 +6,14 @@
 >
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
-**Last updated:** 2026-09-13
-**Status:** Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests. Integration seams frozen in `docs/specs/v1-integration-contract.md`.
+**Last updated:** 2026-09-19
+**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 353 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
+
+> This line said *"Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests."* for the whole of the build, including after the release. It was written when those two models were genuinely all there was, and then it stopped being updated while everything below it kept being.
+>
+> That is worth more than a one-line correction, because the README sends people **here first** — "if you want to understand *why* it's built the way it is, start there." So the first fact a reader got about a finished, tested, released tool was that it was a foundation with two model classes in it. The rest of the file proves otherwise, but nobody argues with the status line; they take it and leave.
+>
+> The lesson for this file specifically: everything else in here is a *record* of something that already happened, which is why it ages well. A status line is a *claim about now*, and a claim about now is the one kind of sentence a decisions log cannot hold without maintaining. Either it gets updated in the release commit or it should not be at the top of the document.
 
 ---
 
