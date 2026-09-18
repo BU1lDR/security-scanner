@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "security-scanner"
-version = "0.1.0"
+version = "1.0.0"
 description = "A unified SAST + DAST + SCA security scanner with an optional AI advisor."
 readme = "README.md"
 requires-python = ">=3.11"
