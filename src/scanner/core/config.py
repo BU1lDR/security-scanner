@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scanner import USER_AGENT
+
 # The frozen v1 config surface (contract §14). Scanner-specific detail keys may
 # grow as each scanner is built; the shapes here match the documented namespace.
 DEFAULTS: dict[str, Any] = {
@@ -27,7 +29,12 @@ DEFAULTS: dict[str, Any] = {
         "authorized_ack": False,
     },
     "http": {
-        "user_agent": "secscan/0.1 (+https://github.com/security-scanner)",
+        # From scanner/__init__.py, not spelled out here. The literal that used to
+        # sit on this line was a second copy of the default User-Agent, and copies
+        # drift: this one and the one in core/http.py both said "secscan/0.1" with
+        # a dead repo URL long after the release was 1.0.0. An operator reading
+        # that header to find out who is scanning them got a 404.
+        "user_agent": USER_AGENT,
         "per_host_rps": 2.0,
         "concurrency": 10,
         "timeout_s": 15.0,

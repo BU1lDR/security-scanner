@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "security-scanner"
-version = "1.0.0"
+# Read from scanner/__init__.py rather than written here. It was written here, and
+# the two disagreed: this said 1.0.0 while the package said 0.1.0 and the default
+# User-Agent said 0.1. A release number in three places is a release number that
+# is wrong in two of them.
+dynamic = ["version"]
 description = "A unified SAST + DAST + SCA security scanner with an optional AI advisor."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +31,9 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 secscan = "scanner.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "scanner.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

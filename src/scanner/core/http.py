@@ -22,10 +22,16 @@ import asyncio
 
 import httpx
 
+from scanner import USER_AGENT
 from scanner.core.gate import RequestClass, RequestGate
 from scanner.core.rate_limit import TokenBucket
 
-DEFAULT_USER_AGENT = "secscan/0.1 (+https://github.com/security-scanner)"
+# Imported, not written out again. This was a literal "secscan/0.1
+# (+https://github.com/security-scanner)" — a version two releases behind and a
+# URL that does not resolve, sent as the User-Agent to every host scanned. See
+# scanner/__init__.py for why that is the one string in the project that must not
+# be allowed to drift. The alias stays because callers and tests use this name.
+DEFAULT_USER_AGENT = USER_AGENT
 
 
 class AsyncHttpClient:
