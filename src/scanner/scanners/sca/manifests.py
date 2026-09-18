@@ -9,6 +9,11 @@ guessing. Lockfiles (``package-lock.json``) are where exact versions are richest
 Supported in v1: ``requirements.txt`` / ``pyproject.toml`` (PyPI) and
 ``package.json`` / ``package-lock.json`` (npm). Poetry/Pipfile lockfiles and npm
 range resolution are deliberately out of v1 scope.
+
+Out of scope is not the same as invisible. Every manifest recognized-but-unparsed
+comes back as a :class:`CoverageGap` so the scanner can say which ecosystems went
+unread, instead of returning the empty list that a genuinely clean project returns
+(decisions.md D42).
 """
 
 from __future__ import annotations
@@ -24,6 +29,39 @@ _MANIFEST_NAMES = frozenset(
     {"requirements.txt", "pyproject.toml", "package.json", "package-lock.json"}
 )
 
+#: Manifests we can recognize but not parse, as
+#: ``name -> (OSV ecosystem, human label, is that ecosystem checked at all)``.
+#:
+#: The third field carries the distinction that makes the resulting finding
+#: honest. ``False`` means the ecosystem is entirely out of scope. ``True`` means
+#: the ecosystem *is* covered and only this declaration format is not — a
+#: ``poetry.lock`` holds PyPI packages, so "this scan does not check PyPI" would
+#: be a false statement about a tool that does.
+_UNSUPPORTED_MANIFESTS: dict[str, tuple[str, str, bool]] = {
+    "composer.json": ("Packagist", "Composer", False),
+    "composer.lock": ("Packagist", "Composer", False),
+    "go.mod": ("Go", "Go module", False),
+    "go.sum": ("Go", "Go module", False),
+    "Gemfile": ("RubyGems", "Bundler", False),
+    "Gemfile.lock": ("RubyGems", "Bundler", False),
+    "pom.xml": ("Maven", "Maven", False),
+    "build.gradle": ("Maven", "Gradle", False),
+    "build.gradle.kts": ("Maven", "Gradle", False),
+    "Cargo.toml": ("crates.io", "Cargo", False),
+    "Cargo.lock": ("crates.io", "Cargo", False),
+    "packages.config": ("NuGet", "NuGet", False),
+    "Pipfile": ("PyPI", "Pipenv", True),
+    "Pipfile.lock": ("PyPI", "Pipenv", True),
+    "poetry.lock": ("PyPI", "Poetry", True),
+}
+
+#: .NET project files are named after the project, so no name set can match them.
+_UNSUPPORTED_SUFFIXES: tuple[tuple[str, tuple[str, str, bool]], ...] = (
+    (".csproj", ("NuGet", "NuGet", False)),
+    (".vbproj", ("NuGet", "NuGet", False)),
+    (".fsproj", ("NuGet", "NuGet", False)),
+)
+
 
 @dataclass(frozen=True)
 class Dependency:
@@ -34,6 +72,35 @@ class Dependency:
     version: str | None
     manifest: str           # path to the manifest it came from
     line: int | None = None
+
+
+@dataclass(frozen=True)
+class CoverageGap:
+    """A manifest that was found but not analysed.
+
+    See ``_UNSUPPORTED_MANIFESTS`` for what ``ecosystem_checked`` means: it picks
+    which of two different true sentences the report should say.
+    """
+
+    ecosystem: str
+    label: str
+    path: str
+    ecosystem_checked: bool = False
+
+    @property
+    def group(self) -> tuple[str, str]:
+        """The key findings are grouped by, so ``composer.json`` and
+        ``composer.lock`` produce one "Composer was not checked" rather than two,
+        while Poetry and Pipenv stay apart despite sharing an ecosystem."""
+        return (self.ecosystem, self.label)
+
+
+@dataclass(frozen=True)
+class Discovery:
+    """The result of one tree walk: what can be parsed, and what cannot."""
+
+    supported: list[Path]
+    gaps: list[CoverageGap]
 
 
 # --- name normalization ---
@@ -165,19 +232,80 @@ def parse_manifest(filename: str, text: str) -> list[Dependency]:
     return []
 
 
+def pyproject_coverage_gap(path: str, text: str) -> CoverageGap | None:
+    """A Poetry project whose dependencies :func:`parse_pyproject` cannot see.
+
+    This is the worst shape the coverage problem takes. ``pyproject.toml`` is a
+    *supported* manifest, so it is discovered, opened and parsed without
+    complaint — but the parser reads PEP 621 tables, and Poetry declares under
+    ``[tool.poetry.dependencies]``. The file yields zero dependencies, the scan
+    reports nothing, and nothing anywhere says the project's entire dependency
+    set went unread. An unrecognized file at least leaves no false impression.
+
+    Returns ``None`` when a PEP 621 table is also present: those dependencies
+    *were* read, so there is no gap to report even if Poetry metadata sits
+    alongside them.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        # The parser is about to raise on the same text and that error is
+        # reported on its own; do not pre-empt it with a misleading gap.
+        return None
+    if not ((data.get("tool") or {}).get("poetry") or {}).get("dependencies"):
+        return None
+    project = data.get("project") or {}
+    if project.get("dependencies") or project.get("optional-dependencies"):
+        return None
+    return CoverageGap("PyPI", "Poetry", path, ecosystem_checked=True)
+
+
 def _is_manifest(filename: str) -> bool:
     return filename in _MANIFEST_NAMES or (
         filename.startswith("requirements") and filename.endswith(".txt")
     )
 
 
-def discover_manifests(root, exclude_dirs=()) -> list[Path]:
-    """Walk ``root`` for recognized manifests, pruning ``exclude_dirs`` by name."""
+def _unsupported_meta(filename: str) -> tuple[str, str, bool] | None:
+    meta = _UNSUPPORTED_MANIFESTS.get(filename)
+    if meta is not None:
+        return meta
+    for suffix, suffix_meta in _UNSUPPORTED_SUFFIXES:
+        if filename.endswith(suffix):
+            return suffix_meta
+    return None
+
+
+def discover(root, exclude_dirs=()) -> Discovery:
+    """Walk ``root`` once, sorting manifests into parseable and merely recognized.
+
+    Excluded directories are pruned for both halves: a ``composer.json`` vendored
+    under ``node_modules`` is somebody else's dependency, and reporting it as a
+    coverage gap in *this* project would be noise.
+    """
     exclude = set(exclude_dirs or ())
-    found: list[Path] = []
+    supported: list[Path] = []
+    gaps: list[CoverageGap] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in exclude]
-        for fn in filenames:
+        for fn in sorted(filenames):
             if _is_manifest(fn):
-                found.append(Path(dirpath) / fn)
-    return found
+                supported.append(Path(dirpath) / fn)
+                continue
+            meta = _unsupported_meta(fn)
+            if meta is not None:
+                ecosystem, label, checked = meta
+                gaps.append(
+                    CoverageGap(ecosystem, label, str(Path(dirpath) / fn), checked)
+                )
+    return Discovery(supported, gaps)
+
+
+def discover_manifests(root, exclude_dirs=()) -> list[Path]:
+    """Walk ``root`` for recognized manifests, pruning ``exclude_dirs`` by name.
+
+    The narrow "what can I parse" view of :func:`discover`, kept because that is
+    all most callers want. Anything that also has to report what it skipped wants
+    ``discover`` instead.
+    """
+    return discover(root, exclude_dirs).supported

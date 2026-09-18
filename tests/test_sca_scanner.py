@@ -102,12 +102,17 @@ def test_vulnerable_pinned_dep_becomes_a_finding(tmp_path):
     assert "CVE-2021-1234" in f.references
 
 
-def test_unpinned_dep_is_not_queried_or_reported(tmp_path):
+def test_unpinned_dep_is_not_queried_but_is_reported_as_unchecked(tmp_path):
+    # This test used to assert ``findings == []``, which encoded the bug: not
+    # querying a range is correct, but saying nothing about it made an unchecked
+    # dependency look like a clean one. The silence is the part that changed; the
+    # empty query list is the part that must not. See tests/test_sca_coverage.py.
     (tmp_path / "requirements.txt").write_text("flask>=2.0\n", encoding="utf-8")
     http = _FakeHttp({"results": []}, {})
     findings = _collect(ScaScanner(), _ctx(tmp_path, http))
-    assert findings == []
     assert http.posts == []
+    assert [f.rule_id for f in findings] == ["sca.coverage.unpinned-dependency"]
+    assert [f.rule_id for f in findings if f.rule_id.startswith("sca.vuln.")] == []
 
 
 def test_finding_without_a_fix_has_no_autofix(tmp_path):

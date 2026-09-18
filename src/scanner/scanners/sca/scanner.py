@@ -16,6 +16,7 @@ allows to be marked auto-applicable (decisions.md D12/D18).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
 from packaging.version import InvalidVersion, Version
 
@@ -25,8 +26,19 @@ from scanner.core.location import Location
 from scanner.core.registry import register
 from scanner.core.rule_id import is_valid
 from scanner.core.scanner import Requires, Scanner
+from scanner.scanners.sca.coverage import (
+    no_manifest_finding,
+    unpinned_findings,
+    unsupported_manifest_findings,
+)
 from scanner.scanners.sca.cvss import base_score, score_to_severity
-from scanner.scanners.sca.manifests import discover_manifests, parse_manifest
+from scanner.scanners.sca.manifests import (
+    CoverageGap,
+    Dependency,
+    discover,
+    parse_manifest,
+    pyproject_coverage_gap,
+)
 from scanner.scanners.sca.osv import OsvClient, Vulnerability
 
 _DEFAULT_EXCLUDES = [".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"]
@@ -124,6 +136,16 @@ def _representative(cluster: list[Vulnerability]) -> Vulnerability:
     return min(cluster, key=rank)
 
 
+@dataclass(frozen=True)
+class _Resolved:
+    """What one pass over the tree produced, before anything is queried."""
+
+    root: str
+    deps: list[Dependency] = field(default_factory=list)
+    gaps: list[CoverageGap] = field(default_factory=list)
+    supported_count: int = 0
+
+
 @register
 class ScaScanner(Scanner):
     name = "sca"
@@ -132,35 +154,79 @@ class ScaScanner(Scanner):
     async def scan(self, ctx):
         if not ctx.target.has_code:
             return
-        for finding in await ctx.run_check("sca", "osv", self._analyze(ctx)):
+        try:
+            resolved = self._resolve(ctx)
+        except Exception as exc:  # reported, never swallowed
+            ctx.emit_error("sca", "discovery", exc)
+            return
+        if resolved is None:      # switched off in config — an explicit choice
+            return
+        # Two checks rather than one, because an OSV outage must not also erase
+        # the record of which manifests went unread. Those are independent facts
+        # and they fail independently.
+        for finding in await ctx.run_check("sca", "coverage", self._coverage(resolved)):
+            yield finding
+        for finding in await ctx.run_check("sca", "osv", self._analyze(ctx, resolved)):
             yield finding
 
-    async def _analyze(self, ctx) -> list[Finding]:
-        deps = self._collect(ctx)
-        if not deps or ctx.http is None:
+    async def _coverage(self, res: _Resolved) -> list[Finding]:
+        """Everything the scan did not look at. Emitted before the OSV results so
+        a reader meets the limits of the scan before its conclusions."""
+        findings: list[Finding] = []
+        if res.supported_count == 0:
+            findings.append(no_manifest_finding(res.root))
+        findings.extend(unsupported_manifest_findings(res.gaps, res.root))
+        findings.extend(unpinned_findings(res.deps, res.root))
+        return findings
+
+    async def _analyze(self, ctx, res: _Resolved) -> list[Finding]:
+        queryable = [d for d in res.deps if d.version]
+        if not queryable:
             return []
-        vulns_by_dep = await OsvClient(ctx.http).find_vulns(deps)
+        if ctx.http is None:
+            # Dependencies were resolved and then abandoned. Returning [] here is
+            # indistinguishable from a clean result, which is the one thing a
+            # scanner must never do (D42) — so this is loud.
+            names = ", ".join(sorted({d.name for d in queryable})[:5])
+            raise RuntimeError(
+                f"{len(queryable)} pinned dependencies were resolved but no HTTP "
+                f"client is available, so none were checked against OSV: {names}"
+            )
+        vulns_by_dep = await OsvClient(ctx.http).find_vulns(queryable)
         return [
             self._to_finding(dep, cluster)
             for dep, vulns in vulns_by_dep.items()
             for cluster in _cluster_vulns(vulns)
         ]
 
-    def _collect(self, ctx):
+    def _resolve(self, ctx) -> _Resolved | None:
+        """One tree walk, two answers: what can be checked and what cannot.
+
+        Returns ``None`` when SCA is disabled in config. That stays silent because
+        an operator switching a scanner off is a recorded decision, not a gap the
+        report has to warn them about.
+        """
         cfg = ctx.config
         if cfg is not None and not cfg.get("sca.enabled", True):
-            return []
+            return None
         ecosystems = set(
             cfg.get("sca.ecosystems", ["PyPI", "npm"]) if cfg else ["PyPI", "npm"]
         )
         excludes = cfg.get("sca.exclude_dirs", _DEFAULT_EXCLUDES) if cfg else _DEFAULT_EXCLUDES
-        deps = []
-        for path in discover_manifests(ctx.target.code_path, exclude_dirs=excludes):
+        root = ctx.target.code_path
+        found = discover(root, exclude_dirs=excludes)
+        deps: list[Dependency] = []
+        gaps: list[CoverageGap] = list(found.gaps)
+        for path in found.supported:
             text = path.read_text(encoding="utf-8", errors="replace")
+            if path.name == "pyproject.toml":
+                gap = pyproject_coverage_gap(str(path), text)
+                if gap is not None:
+                    gaps.append(gap)
             for dep in parse_manifest(str(path), text):
                 if dep.ecosystem in ecosystems:
                     deps.append(dep)
-        return deps
+        return _Resolved(root, deps, gaps, len(found.supported))
 
     def _to_finding(self, dep, cluster: list[Vulnerability]) -> Finding:
         rep = _representative(cluster)
