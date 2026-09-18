@@ -10,6 +10,18 @@ There's also an optional AI step that explains each finding in plain English and
 
 You point it at a URL or a folder and it figures out which checks make sense for that target.
 
+## Authorized use only
+
+This tool performs active security testing. In its default mode it makes real requests to
+whatever host you point it at; with `--active` it sends attack-shaped input — injection
+payloads, traversal strings, probe requests — to that host and reads what comes back.
+
+Run it only against systems you own, or systems whose owner has given you written
+permission to test. Unauthorized scanning is illegal in most jurisdictions regardless of
+intent, and "I was only checking" is not a defence. If you do not have that permission in
+writing, stick to the code side (`secscan path/to/code`) — that reads local files and never
+touches the target.
+
 ## Getting it running
 
 You'll need Python 3.11 or newer. From the project folder:
@@ -66,3 +78,7 @@ Only run those against something you own or have permission to test. The payload
 ## Want to know how it works?
 
 I kept a running log of every design decision, and a plain-language glossary of every security concept it touches, in [decisions.md](decisions.md). If you want to understand *why* it's built the way it is rather than just how to run it, start there.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
