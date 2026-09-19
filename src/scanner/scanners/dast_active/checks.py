@@ -25,7 +25,7 @@ Findings carry ``fix=None``: a live app has no file for us to patch (contract §
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.location import Location
@@ -131,7 +131,18 @@ async def _send(http, point, value: str):
     params = _params_with(point, value)
     try:
         if point.where == "body":
-            return await http.post(point.url, active=True, data=params)
+            # Encode the body ourselves rather than passing the pairs to `data=`.
+            # httpx only form-encodes `data=` when it is a Mapping; given a list
+            # it falls back to raw-content encoding and builds a *sync* byte
+            # stream, which AsyncClient then refuses outright. Hand-encoding also
+            # keeps duplicate field names (checkbox groups), which dict() would
+            # collapse.
+            return await http.post(
+                point.url,
+                active=True,
+                content=urlencode(params),
+                headers={"content-type": "application/x-www-form-urlencoded"},
+            )
         return await http.get(point.url, active=True, params=params)
     except Exception:  # noqa: BLE001 - a failed probe is not a finding
         return None

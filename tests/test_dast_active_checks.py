@@ -1,8 +1,15 @@
 import asyncio
 import html
+from urllib.parse import parse_qsl
 
+import httpx
+
+from scanner.core.egress import Egress
 from scanner.core.finding import Confidence, Severity
+from scanner.core.gate import RequestGate
+from scanner.core.http import AsyncHttpClient
 from scanner.core.rule_id import is_valid
+from scanner.core.scope import Scope
 from scanner.scanners.dast_active.checks import (
     check_open_redirect,
     check_sqli_error,
@@ -184,3 +191,86 @@ def test_open_redirect_skips_params_that_are_not_url_like():
     findings = _run(check_open_redirect(_point(param="q", value="hi"), http))
     assert findings == []
     assert http.requests == []  # never even sent a probe for a non-URL param
+
+
+# --- the body probe actually reaches the wire --------------------------------
+# Every double above is hand-rolled, so none of them exercise httpx's own
+# encoding rules -- which is how a real bug shipped. `_send` passed `data=` a
+# list of pairs; httpx only form-encodes `data=` when it is a Mapping, so it fell
+# through to raw-content encoding, built a *sync* byte stream, and AsyncClient
+# refused it outright. `_send` swallows exceptions, so every body probe silently
+# no-opped: the active tier reported a clean bill of health on POST forms it had
+# never actually tested. A stub with `async def post(..., data=None)` cannot
+# catch that, because the shape it accepts is the broken one.
+#
+# So this drives the real AsyncHttpClient and fakes only the socket.
+
+
+def _real_client(handler):
+    """A real client and a real gate; httpx.MockTransport stands in for the
+    network so the request is genuinely built and encoded."""
+    scope = Scope(
+        allowed_hosts={"example.com"},
+        active_allowlist={"example.com"},
+        authorized_ack=True,
+    )
+    return AsyncHttpClient(
+        RequestGate(scope=scope, egress=Egress()),
+        user_agent="secscan-test/1.0",
+        per_host_rps=1000.0,          # keep the token bucket out of the way
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def _body_point(param="comment", base=(("csrfmiddlewaretoken", "tok"), ("comment", "hi"))):
+    return InjectionPoint("POST", "https://example.com/comment", param, base, "body")
+
+
+def test_body_probe_is_form_encoded_and_reaches_the_transport():
+    seen = []
+
+    def handler(request):
+        body = request.content.decode()
+        seen.append({
+            "method": request.method,
+            "content_type": request.headers.get("content-type"),
+            "body": body,
+        })
+        reflected = dict(parse_qsl(body, keep_blank_values=True)).get("comment", "")
+        return httpx.Response(200, html=f"<html><body>{reflected}</body></html>")
+
+    async def go():
+        async with _real_client(handler) as http:
+            return await check_xss_reflected(_body_point(), http)
+
+    findings = _run(go())
+
+    assert len(seen) == 1, "the body probe never reached the transport"
+    assert seen[0]["method"] == "POST"
+    assert seen[0]["content_type"] == "application/x-www-form-urlencoded"
+    # Untampered fields keep their captured values, so CSRF-protected forms still
+    # validate and the probe reaches the handler instead of a 403.
+    assert "csrfmiddlewaretoken=tok" in seen[0]["body"]
+    assert len(findings) == 1
+    assert findings[0].rule_id == "dast.active.xss-reflected"
+    assert findings[0].location.param == "comment"
+
+
+def test_body_probe_keeps_duplicate_field_names():
+    seen = []
+
+    def handler(request):
+        seen.append(request.content.decode())
+        return httpx.Response(200, html="<html>static</html>")
+
+    async def go():
+        async with _real_client(handler) as http:
+            point = _body_point(param="topic", base=(("topic", "a"), ("topic", "b")))
+            return await check_xss_reflected(point, http)
+
+    _run(go())
+
+    assert len(seen) == 1
+    # Both fields survive. dict(params) would have collapsed a checkbox group to
+    # a single pair and quietly changed the request being tested.
+    assert len(parse_qsl(seen[0], keep_blank_values=True)) == 2

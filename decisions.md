@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 396 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 398 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -392,6 +392,103 @@ to miss: everything worked, and the working thing said nothing. [D42] and [D46] 
 the same shape one layer down, where a check that could not run at all produced an
 empty result that read as clean. Here the check ran, and the report read as though it
 had not.
+
+### D51 — A probe that never left the process reads as a form with nothing wrong with it
+
+[D50] closed by saying the check ran and the report read as though it had not. This is
+the other half of that sentence, and it is worse: the active scanner ran, the report
+now correctly records that it ran, and on the POST path it sent nothing at all. For as
+long as the active tier has existed — the line arrived in the initial commit and was
+never edited since — **not one POST probe has ever been sent**. Every body injection
+point the crawler found was reported clean without a single request leaving the process.
+
+**The mechanism.** `_send` builds its parameters as a list of `(name, value)` pairs.
+That is correct for `httpx`'s `params=` on the GET path and wrong for `data=` on the
+POST path: `httpx` form-encodes `data=` only when it is a `Mapping`, and handed a list
+it falls through to raw-content encoding, wraps the body in a *synchronous* byte
+stream, and `AsyncClient` then refuses the request it has just finished building —
+`RuntimeError: Attempted to send an sync request with an AsyncClient instance`. `httpx`
+is not even quiet about the misuse; it raises `DeprecationWarning: Use 'content=<...>'
+to upload raw bytes/text content` on the way past. None of that reached anybody,
+because `_send` ends in `except Exception: return None`, annotated "a failed probe is
+not a finding" — a clause written for the honest case of a probe the target rejects,
+doing duty for a probe that was never capable of being sent. The checks then read an
+empty body, matched no signature, and returned nothing. Three checks against every
+POST parameter on the site: all clean, none tested.
+
+**Three silences stacked, and each looked like a different reasonable thing.** The
+`except Exception` looked like fault isolation. The unit tests looked like coverage:
+every double in `test_dast_active_checks.py` is hand-rolled, and the only one that
+implements a body request declares `async def post(self, url, *, active=False,
+data=None, **kwargs)` — it was shaped to accept the broken call, so it could not fail
+on it. And [D43]'s wire log looked like verification: it recorded **33 of 33 requests
+were GET** and read that as `include_post` being off and honoured in practice. It was.
+But a completely broken POST path produces that same observation, and nothing in that
+run could separate the two, because with `include_post` off there were no body points,
+so the POST path could not fail. [D43] closes on precisely this — "a verification that
+can only succeed proves nothing, whether the thing that can't fail is the target or
+the harness." It was said about the harness. It was equally true of a disabled code
+path, and that reading went unmade.
+
+**The default hid it.** `dast.active.include_post` defaults to `false`, so reaching
+this bug required turning on a non-default flag *and* aiming the scanner at an
+application whose inputs are POST forms — which is to say, at almost any real
+application. The default is defensible on its own terms: a body probe can submit a
+login or post a comment, and that deserves an explicit opt-in. But it meant the
+shipped configuration never executed the line, and every live exercise of the active
+tier so far had run with it off. A default that makes a code path unreachable also
+makes it unverified, and nothing in the report distinguishes "off" from "broken".
+
+**Encoded here, not handed over as a dict.** `dict(params)` is the shorter fix and it
+is the wrong one: a checkbox group, or any repeated field name, collapses to a single
+pair and silently turns the request under test into a different request. `urlencode`
+over the ordered pairs keeps them, and the content-type is stated outright rather than
+left to inference.
+
+**Found by aiming it at PyGoat.** The crawler walked 48 pages and turned the login and
+register forms into six body injection points; PyGoat's own access log recorded
+**zero** POST requests for the entire run. The report showed three passive findings and
+nothing active — from the outside, indistinguishable from a scan that tested those
+forms and found them sound. They are in fact sound, which is the sharper hazard: the
+right answer arrived, for none of the right reasons. After the fix the same entry point
+puts **eighteen** POSTs in that log, all HTTP 200 — six on `/login/` and twelve on
+`/register`, which is exactly six injection points times one XSS probe plus two SQLi
+requests, so every probe the tier believes it sent is now accounted for on the server.
+Two earlier probes, from a hand-written script that did not persist the session cookie,
+were rejected `403 Forbidden (CSRF cookie not set.)`. That is the corroboration and not
+a loose end: it is what the tier would do on every Django POST form if the crawler's
+captured `csrfmiddlewaretoken` and the client's cookie jar were not both carrying.
+
+**The tests are driven through the real client.** Both new cases build an actual
+`AsyncHttpClient` over an `httpx.MockTransport`, so the request is genuinely
+constructed and encoded and only the socket is faked. They assert that the transport
+*received* a POST, that its content-type is `application/x-www-form-urlencoded`, that
+untampered sibling fields keep their captured values (so a CSRF-protected form still
+routes instead of 403ing), and that duplicate field names survive. Both fail without
+the fix. A hand-rolled double could not have caught this, and a stricter hand-rolled
+double would not have either: the constraint that was violated belongs to `httpx`, so
+the only test that can see it is one that lets `httpx` decide. That is [D48]'s move —
+ask the library that owns the rule instead of reimplementing your belief about it —
+applied to a test double rather than to a regex.
+
+**Why:** [D49] found this same shape from the other end and did not recognise it as the
+same shape. There, a typo in `dast.active.checks` selected no checks, "so the active
+tier ran, tried no checks, found nothing, and handed back an empty result that reads
+exactly like a clean bill of health on an authorized penetration test." Here the
+selection was right, the checks ran, and the requests they were built to send were
+discarded between the check and the socket. One is a config surface that accepts
+nonsense, the other a client call that silently no-ops, and both terminate in a clean
+report on an untested target — which suggests the recurring defect is not any of the
+individual mechanisms but the absence of a single place that can say "this probe was
+sent and this is what came back". [D50] added the record of which scanners ran; it
+cannot distinguish a scanner that sent twenty requests from one that sent none, and on
+the strength of this entry that is the next thing worth closing. The narrower lesson
+is about doubles: when a component's real contract belongs to a library underneath it,
+a double written to the component's own call signature tests the author's belief about
+that library and nothing else. Three tiers of defence existed here — a broad
+exception handler, a unit suite, and a live wire capture — and all three were
+satisfied by code that did nothing, because each of them was built from the same
+misunderstanding as the code it was guarding.
 
 ---
 
