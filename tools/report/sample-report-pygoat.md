@@ -6,7 +6,7 @@
 **Assessment type:** Full Assessment — static code review and dependency composition analysis  
 **Assessment window:** 18 September 2026  
 **Report date:** 18 September 2026  
-**Assessor:** Aryan Verma — aryanverma102007@gmail.com  
+**Assessor:** Aryan Verma — aryan.verma.contacts@gmail.com  
 **Methodology:** Automated detection with manual triage  
 **Tooling:** `secscan` 1.0.0 — four scanners, 17 static rules, OSV.dev advisory data  
 **Report version:** 1.0 — final
@@ -1601,4 +1601,4 @@ deployment, and some of those assumptions are mine rather than yours. The
 assumption most likely to be wrong is the one in section 3.4 about who can
 register an account.
 
-**Aryan Verma** — aryanverma102007@gmail.com
+**Aryan Verma** — aryan.verma.contacts@gmail.com
