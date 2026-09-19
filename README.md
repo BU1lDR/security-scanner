@@ -65,6 +65,18 @@ secscan path/to/code --ai
 
 The scan exits `0` when it's clean, `1` when it finds something at or above your severity threshold, and `2` if something actually broke. That's the usual convention, so it drops straight into a CI pipeline.
 
+## Settings
+
+Anything you'd rather not retype every run goes in a TOML or JSON file:
+
+```bash
+secscan path/to/code --config secscan.toml
+```
+
+[docs/configuration.md](docs/configuration.md) lists every setting with its default — rate limits, scope, which directories to skip, crawl bounds, the active-check budget. Only the keys you want to change need to be in the file, and a command-line flag always beats the file.
+
+A misspelt key is a hard error rather than something quietly ignored, which matters more here than it sounds: these are the settings that bound what the tool does to a machine that isn't yours, and "your exclusion didn't apply and nobody mentioned it" is the wrong way to find out. If you're thinking of putting `authorized_ack` in a file, read [that section](docs/configuration.md#read-this-before-putting-authorized_ack-in-a-file) first — it's the same legal assertion as typing `--i-am-authorized`, but it doesn't show up in the command you ran.
+
 ## About the active checks
 
 By default the scanner is passive — it looks, it doesn't poke. The intrusive checks (the ones that send test input to a site) stay off unless you turn them on *and* confirm you're allowed to test the target:

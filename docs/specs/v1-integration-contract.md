@@ -435,6 +435,13 @@ rate is the client's job.
 
 ## 14. Config namespace (frozen)
 
+> This section is the namespace declaration for implementers: which names exist and
+> where they live. It is **not** the user reference, and for most of the project's
+> life it was mistaken for one — it gives bare names, trails off with `...` in four
+> places, and omits `sca.exclude_dirs` entirely. Every setting with its type,
+> default and meaning is in **[../configuration.md](../configuration.md)**, which is
+> checked against `DEFAULTS` by the test suite.
+
 Flat, top-level per area. No `scanners.<name>.*` nesting.
 
 ```

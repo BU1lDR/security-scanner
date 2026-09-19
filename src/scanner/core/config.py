@@ -12,6 +12,7 @@ both are dependency-free. YAML is intentionally not supported in v1.
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 import tomllib
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from scanner import USER_AGENT
+from scanner.core.finding import Confidence, Severity
 
 #: Directory names pruned from any local walk, matched by name at any depth.
 #:
@@ -105,6 +107,102 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+def unknown_keys(raw: dict, defaults: dict | None = None, prefix: str = "") -> list[str]:
+    """Dotted paths in ``raw`` that do not exist in the config surface.
+
+    A config file used to be able to say anything at all. ``exclude_dir`` instead
+    of ``exclude_dirs`` was accepted, merged in beside the real key, and ignored —
+    so the directory you asked to skip was scanned anyway and nothing said so.
+    ``per_host_rate`` instead of ``per_host_rps`` left the target being hit at the
+    default rate while the file on disk claimed otherwise. Both are settings whose
+    whole purpose is to constrain what the tool does to someone else's machine.
+
+    That is the same failure as [D42] and [D46] one layer out: not a wrong answer,
+    an instruction that was never carried out and never reported. A security tool
+    that silently declines to apply your exclusions is worse than one that has no
+    exclusions, because you checked.
+
+    Only key *names* are checked, not value types. ``per_host_rps = "fast"`` still
+    gets through here and fails later in the rate limiter. Said plainly rather than
+    implied away; keys are where the silent-no-op lives.
+    """
+    defaults = DEFAULTS if defaults is None else defaults
+    bad: list[str] = []
+    for key, value in raw.items():
+        path = f"{prefix}{key}"
+        if key not in defaults:
+            bad.append(path)
+            continue
+        expected = defaults[key]
+        if isinstance(value, dict) and isinstance(expected, dict):
+            bad.extend(unknown_keys(value, expected, prefix=f"{path}."))
+    return bad
+
+
+#: Settings whose value comes from a closed set, and the set.
+#:
+#: Key names are not the only place a typo becomes a silent no-op.
+#: ``dast.active.checks`` is filtered with ``{n: ALL_CHECKS[n] for n in names if n
+#: in ALL_CHECKS}``, so one misspelt entry is dropped without comment — and if it
+#: was the only entry, the active tier runs *no checks at all* while the operator
+#: believes intrusive scanning is on and reads the empty result as "nothing found".
+#: That is the worst direction for this particular mistake to fail in.
+#:
+#: Only closed sets are listed. Open-ended values (hosts, directory names, model
+#: identifiers) cannot be checked here and are not pretended to be.
+#: Two of these are *derived* from the enums that define them, not typed out
+#: again. A hand-copied set here would be a fresh instance of the bug
+#: :data:`DEFAULT_EXCLUDE_DIRS` exists to record — a second copy of a list, in a
+#: place nobody thinks to update, silently winning. The remaining two cannot be
+#: imported without a cycle (``reporting`` and the dast-active scanner both sit
+#: above this module), so ``tests/test_config.py`` asserts they still agree
+#: with their source of truth instead.
+VALUE_CHOICES: dict[str, frozenset[str]] = {
+    "reporting.format": frozenset({"terminal", "json", "html"}),
+    "reporting.severity_threshold": frozenset(s.name.lower() for s in Severity),
+    "sast.min_confidence": frozenset(c.name.lower() for c in Confidence),
+    "sca.ecosystems": frozenset({"PyPI", "npm"}),
+    "dast.active.checks": frozenset({"xss-reflected", "sqli-error", "open-redirect"}),
+}
+
+
+def bad_values(cfg: "Config") -> list[str]:
+    """Human-readable complaints about settings outside their closed set."""
+    problems: list[str] = []
+    for key, allowed in VALUE_CHOICES.items():
+        value = cfg.get(key)
+        if value is None:
+            continue
+        given = value if isinstance(value, list) else [value]
+        for item in given:
+            if item in allowed:
+                continue
+            close = difflib.get_close_matches(str(item), sorted(allowed), n=1, cutoff=0.6)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            problems.append(
+                f"  {key} = {item!r} is not one of "
+                f"{', '.join(sorted(allowed))}{hint}"
+            )
+    return problems
+
+
+def _did_you_mean(path: str) -> str:
+    """The nearest real key at the same level, if there is an obvious one."""
+    *parents, leaf = path.split(".")
+    node: Any = DEFAULTS
+    for part in parents:
+        if not isinstance(node, dict) or part not in node:
+            return ""
+        node = node[part]
+    if not isinstance(node, dict):
+        return ""
+    close = difflib.get_close_matches(leaf, list(node), n=1, cutoff=0.6)
+    if not close:
+        return ""
+    prefix = ".".join(parents)
+    return f" (did you mean {prefix + '.' if prefix else ''}{close[0]}?)"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Return a new dict with ``override`` layered onto ``base``; nested dicts
     merge recursively rather than replacing the whole subtree."""
@@ -131,6 +229,19 @@ class Config:
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
+        """Read a TOML or JSON config file, rejecting keys that do not exist.
+
+        Validation lives here rather than in :meth:`from_dict` because this is the
+        one entry point fed by a human-written file. ``from_dict`` stays lenient:
+        it is the internal merge constructor, called throughout the codebase and
+        in tests with dicts that are known-good by construction.
+
+        An unknown key is an error, not a warning, for the same reason an
+        unsupported file format already is. A warning about a setting that was not
+        applied is a line in a log nobody reads, and the settings most worth
+        mistyping — ``exclude_dirs``, ``per_host_rps``, ``authorized_ack`` — are
+        the ones that bound what this tool does to a machine that is not yours.
+        """
         path = Path(path)
         suffix = path.suffix.lower()
         if suffix == ".toml":
@@ -142,7 +253,23 @@ class Config:
             raise ValueError(
                 f"Unsupported config format {suffix!r}; use .toml or .json"
             )
-        return cls.from_dict(raw)
+
+        bad = unknown_keys(raw)
+        if bad:
+            listed = "\n".join(f"  {k}{_did_you_mean(k)}" for k in bad)
+            raise ValueError(
+                f"unknown setting(s) in {path.name}:\n{listed}\n"
+                f"These would have been ignored silently. See docs/configuration.md "
+                f"for every key this tool reads."
+            )
+
+        cfg = cls.from_dict(raw)
+        wrong = bad_values(cfg)
+        if wrong:
+            raise ValueError(
+                f"invalid setting value(s) in {path.name}:\n" + "\n".join(wrong)
+            )
+        return cfg
 
     def merged(self, overrides: dict) -> "Config":
         """Return a new Config with ``overrides`` layered on top of this one."""

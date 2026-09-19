@@ -56,7 +56,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "target",
         help="URL (https://…), bare host (example.com), or a local code path.",
     )
-    p.add_argument("--config", metavar="PATH", help="TOML or JSON config file.")
+    p.add_argument(
+        "--config",
+        metavar="PATH",
+        help="TOML or JSON config file (every key: docs/configuration.md).",
+    )
     p.add_argument(
         "--format",
         choices=["terminal", "json", "html"],
