@@ -3,16 +3,20 @@
 This exists because that number was wrong three times in a row, and each time the
 thing that made it wrong was adding tests — the most routine change there is. A
 figure that goes stale every time the project improves is a figure nobody can
-maintain by remembering to, so it is checked instead.
+maintain by remembering to, so it is checked instead. (Four times, counting the
+commit that added this file: the inert-span guard took the suite 357 -> 367 and
+this script is what caught it, which is the check earning its keep on its first
+real outing rather than a hypothetical.)
 
 Run from the repo root: ``python tools/check_test_count.py``. Exits non-zero with
 both numbers and the line to edit. CI runs it; it needs no network and no state
 beyond a collection pass.
 
 Deliberately not clever about where the number may live: one pattern, one file.
-Other repos quote this count too (the portfolio, the profile README) and CI here
-cannot see them — so when this fails, the fix is usually more than one file. The
-error message says so.
+Exactly one copy survives outside this repo — the portfolio résumé, which has its
+own source-to-PDF check — and CI here cannot see it, so the error message names it.
+The other two external copies were deleted rather than synced: a number in a place
+with no mechanism to check it is a liability, not a detail.
 """
 
 from __future__ import annotations
@@ -68,9 +72,15 @@ def main() -> int:
     line_no = text[: quoted.start()].count("\n") + 1
     print(
         f"{DOC.name}:{line_no} claims {claimed} tests; pytest collects {actual}.\n"
-        f"Update that line. The same figure is quoted outside this repo — the "
-        f"portfolio's js/data.js and assets/resume.src.html, and the profile "
-        f"README — and CI here cannot check those, so check them by hand."
+        f"Update that line.\n"
+        f"\n"
+        f"One copy of this figure lives outside this repo and CI here cannot reach\n"
+        f"it: the portfolio's assets/resume.src.html. Update it and rebuild the PDF\n"
+        f"(node tools/build-resume.js), which checks the PDF against the source.\n"
+        f"\n"
+        f"There used to be two more, in the portfolio's js/data.js and the profile\n"
+        f"README. They were deleted rather than synced, because a number nobody can\n"
+        f"check is worse than no number. Do not add them back."
     )
     return 1
 
