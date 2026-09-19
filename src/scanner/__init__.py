@@ -17,7 +17,7 @@
 # So: pyproject.toml now reads __version__ from here (dynamic version), and
 # core/http.py and core/config.py both take USER_AGENT from here rather than
 # each holding a literal. Bumping a release means editing one line in one file.
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 #: Where a scanned host's operator can find out what hit them. Must be a URL
 #: that actually resolves — this is the only contact channel the scanner offers.
