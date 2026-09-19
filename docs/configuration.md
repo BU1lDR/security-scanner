@@ -103,19 +103,31 @@ no-op lived; this is a real remaining gap, not a solved problem.
 `--i-am-authorized` on the command line, and it has the same effect: combined with
 `dast.active.enabled = true` it sends attack-shaped input — injection payloads,
 traversal strings, probe requests — to the target. Measured, not assumed: a config
-file alone produces identical active findings to the two flags, with no flag typed
-and nothing printed to say so.
+file alone produces identical active findings to the two flags, with no flag typed.
 
-Three consequences worth knowing before you write that line:
+The report now says so, in every format:
 
-- **It is invisible.** The command is just `secscan https://target/`. Shell
-  history, CI logs and `ps` output show no `--active`, no `--i-am-authorized`.
-- **It travels.** Config files get copied between projects and committed to
-  repositories. A legal assertion about one host does not transfer to the next
-  one, but the file does.
-- **It is opaque to reviewers.** Someone reading a pull request that adds
-  `authorized_ack = true` has no reason to know that line means "I have written
-  permission to attack this host" unless they have read this page.
+```
+Security scan report
+Target: https://target/
+Ran: dast, dast-active
+ACTIVE CHECKS RAN. This scan sent attack-shaped requests (dast-active) to the target.
+```
+
+That line appears whether or not the active checks found anything, and whether the
+authorization came from a flag or from this file. It did not exist until the
+config surface was documented and somebody looked — see D49 and D50.
+
+Two things it does not fix, which are worth knowing before you write that line:
+
+- **The invocation is still silent.** The command is just
+  `secscan https://target/`. Shell history, CI logs and `ps` output show no
+  `--active`, no `--i-am-authorized`. Only the report knows.
+- **The file travels.** Config files get copied between projects and committed to
+  repositories, and a legal assertion about one host does not transfer to the next
+  one. Someone reviewing a pull request that adds `authorized_ack = true` has no
+  reason to know that line means "I have written permission to attack this host"
+  unless they have read this page.
 
 None of that is a reason to avoid config files. It is a reason to keep this
 particular key on the command line, where it is visible in the invocation, unless

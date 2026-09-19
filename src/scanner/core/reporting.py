@@ -59,6 +59,26 @@ def _grouped_by_family(findings: list[Finding]) -> list[tuple[str, list[Finding]
     )
 
 
+def _what_ran(report: ScanReport) -> list[str]:
+    """Lines disclosing which scanners ran, and whether any of them attacked.
+
+    A report that lists only findings answers "what is wrong with the target". It
+    does not answer "what did this tool do to the target", and for the intrusive
+    tier that is the question a report may one day have to answer. Placed near the
+    top of the terminal output rather than the bottom: the point is that it is seen
+    without being looked for.
+    """
+    if not report.scanners_run:
+        return []          # hand-built report (a fixture, an older caller)
+    lines = [f"Ran: {', '.join(report.scanners_run)}"]
+    if report.sent_active_traffic:
+        lines.append(
+            "ACTIVE CHECKS RAN. This scan sent attack-shaped requests "
+            f"({', '.join(report.active_scanners_run)}) to the target."
+        )
+    return lines
+
+
 def _severity_counts(findings: list[Finding]) -> dict[str, int]:
     counts = Counter(f.severity for f in findings)
     return {sev.name.lower(): counts.get(sev, 0) for sev in _SEVERITY_ORDER}
@@ -110,6 +130,7 @@ def _render_terminal(report: ScanReport, target) -> str:
     lines: list[str] = ["Security scan report"]
     if target is not None and getattr(target, "url", None):
         lines.append(f"Target: {target.url}")
+    lines.extend(_what_ran(report))
     lines.append("")
 
     if not report.findings:
@@ -165,6 +186,18 @@ def _render_json(report: ScanReport, target) -> str:
             for e in report.errors
         ],
     }
+    # Omitted entirely when nothing was recorded, rather than emitted as
+    # "sent_active_traffic": false. An unrecorded scan is not a passive scan, and
+    # a consumer gating a pipeline on this key should get a missing key it has to
+    # handle rather than a reassuring default it will not question. The terminal
+    # and HTML renderers print nothing in the same case, for the same reason.
+    if report.scanners_run:
+        doc["scan"] = {
+            "scanners_run": list(report.scanners_run),
+            "active_scanners_run": list(report.active_scanners_run),
+            "sent_active_traffic": report.sent_active_traffic,
+        }
+
     return _json.dumps(doc, indent=2)
 
 
@@ -183,6 +216,9 @@ def _render_html(report: ScanReport, target) -> str:
     ]
     if target is not None and getattr(target, "url", None):
         parts.append(f"<p>Target: {esc(target.url)}</p>")
+    for line in _what_ran(report):
+        emphasis = "strong" if line.startswith("ACTIVE") else "span"
+        parts.append(f"<p><{emphasis}>{esc(line)}</{emphasis}></p>")
 
     counts = _severity_counts(report.findings)
     summary = ", ".join(f"{counts[s]} {s}" for s in ("critical", "high", "medium", "low", "info"))

@@ -46,6 +46,42 @@ class ScanReport:
     findings: list[Finding]
     errors: list[ScanError] = field(default_factory=list)
 
+    #: Names of the scanners that actually ran, in selection order.
+    #:
+    #: A report used to say only what was *found*. What was *done* was not
+    #: recorded anywhere, and for the intrusive tier that is the more important
+    #: of the two. Measured before this existed: a config file with
+    #: ``dast.active.enabled`` and ``scope.authorized_ack`` set sends injection
+    #: payloads, traversal strings and probe requests to the target while the
+    #: command is a bare ``secscan https://host/`` — no flag in shell history, no
+    #: line on stderr, and nothing in the report. An active scan that happened to
+    #: find nothing was indistinguishable from a passive one.
+    #:
+    #: That matters because of what this report is *for*. The README says
+    #: unauthorized scanning is illegal in most jurisdictions; the report is the
+    #: artifact you keep to show what you did to a host and when. A record of
+    #: findings alone cannot answer the only question that would ever be asked of
+    #: it, which is whether you attacked the machine or just looked at it.
+    #:
+    #: Default empty so a hand-built ScanReport (tests, fixtures) stays valid.
+    #: Renderers show the line only when the list is populated, so an empty one
+    #: reads as "not recorded" rather than as "nothing ran".
+    scanners_run: list[str] = field(default_factory=list)
+
+    #: The subset of :attr:`scanners_run` that sends attack-shaped traffic.
+    #:
+    #: Recorded by the engine from ``cls.requires.active`` rather than derived
+    #: here from the name, because ``requires.active`` is the flag the gate itself
+    #: reads. Inferring it from a ``-active`` name suffix would be a second,
+    #: weaker definition of "intrusive" that a rename could silently falsify —
+    #: and this is the one field in the report where being quietly wrong is worse
+    #: than being absent.
+    active_scanners_run: list[str] = field(default_factory=list)
+
+    @property
+    def sent_active_traffic(self) -> bool:
+        return bool(self.active_scanners_run)
+
     def exit_code(self, threshold: Severity) -> int:
         """0 = clean, 1 = a finding at or above ``threshold``. (Exit code 2 is
         reserved for engine-level failure and is decided at the CLI, D14.)"""
@@ -85,8 +121,17 @@ class Engine:
             config=config,
         )
         collected: list[Finding] = []
-        for cls in self.select(target, active_enabled=active_enabled):
+        selected = self.select(target, active_enabled=active_enabled)
+        for cls in selected:
             scanner = cls()
             async for finding in scanner.scan(ctx):
                 collected.append(finding)
-        return ScanReport(findings=dedupe(collected), errors=ctx.errors)
+        return ScanReport(
+            findings=dedupe(collected),
+            errors=ctx.errors,
+            # Recorded from the selection, not from what produced findings: a
+            # check that ran and found nothing still sent the requests, and that
+            # is exactly the case the disclosure exists for.
+            scanners_run=[cls.name for cls in selected],
+            active_scanners_run=[cls.name for cls in selected if cls.requires.active],
+        )

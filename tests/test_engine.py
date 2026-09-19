@@ -180,3 +180,86 @@ def test_exit_code_one_when_a_finding_meets_threshold():
 
 def test_exit_code_zero_for_empty_report():
     assert ScanReport(findings=[], errors=[]).exit_code(Severity.INFO) == 0
+
+
+# ── the report records what was done, not only what was found ────────────────
+#
+# A report used to list findings and nothing else. What the tool *did* to the
+# target was recorded nowhere, which for the intrusive tier is the more important
+# of the two: measured before this existed, a config file with dast.active.enabled
+# and scope.authorized_ack set sent injection payloads to the target while the
+# command was a bare `secscan https://host/` — no flag in shell history, nothing on
+# stderr, nothing in the report. See D49.
+
+def test_the_report_names_the_scanners_that_ran():
+    A = _yielding("sast", Requires(code=True), [])
+    B = _yielding("sca", Requires(code=True), [])
+    engine = _engine_with(A, B)
+    report = asyncio.run(engine.run(Target(code_path="./x", scope=Scope())))
+    assert report.scanners_run == ["sast", "sca"]
+
+
+def test_a_scanner_that_found_nothing_is_still_recorded():
+    """The case the disclosure exists for.
+
+    An active check that ran and found nothing still sent the requests. If the
+    record were built from what produced findings, the one scan you would most want
+    disclosed — attack traffic that turned up clean — would be the one scan that
+    looked passive.
+    """
+    Act = _yielding("dast-active", Requires(url=True, active=True), [])
+    engine = _engine_with(Act)
+    report = asyncio.run(engine.run(_active_target(), active_enabled=True))
+    assert report.findings == []
+    assert report.scanners_run == ["dast-active"]
+    assert report.sent_active_traffic is True
+
+
+def test_active_traffic_is_recorded_from_requires_not_from_the_name():
+    """The flag, not the naming convention.
+
+    A scanner called `probe` with requires.active must still be disclosed, and one
+    called `dast-active-helper` without it must not be. Deriving this from a name
+    suffix would be a second, weaker definition of intrusive that a rename could
+    silently falsify.
+    """
+    Sneaky = _yielding("probe", Requires(url=True, active=True), [])
+    engine = _engine_with(Sneaky)
+    report = asyncio.run(engine.run(_active_target(), active_enabled=True))
+    assert report.active_scanners_run == ["probe"]
+    assert report.sent_active_traffic is True
+
+
+def test_a_passive_scan_records_no_active_traffic():
+    Passive = _yielding("dast", Requires(url=True), [_finding()])
+    engine = _engine_with(Passive)
+    report = asyncio.run(engine.run(_active_target(), active_enabled=False))
+    assert report.scanners_run == ["dast"]
+    assert report.active_scanners_run == []
+    assert report.sent_active_traffic is False
+
+
+def test_a_gated_out_active_scanner_is_not_recorded_as_having_run():
+    """Requested but refused is not the same as ran.
+
+    Claiming attack traffic that never left would be a false entry in the one field
+    whose whole purpose is to be trustworthy about that.
+    """
+    Act = _yielding("dast-active", Requires(url=True, active=True), [_finding()])
+    engine = _engine_with(Act)
+    report = asyncio.run(
+        engine.run(_active_target(authorized=False), active_enabled=True)
+    )
+    assert report.scanners_run == []
+    assert report.sent_active_traffic is False
+
+
+def test_a_hand_built_report_stays_valid():
+    """Backwards compatibility, asserted rather than assumed.
+
+    Fixtures and older callers construct ScanReport(findings=[...]). An empty
+    record must mean "not recorded" and must not claim a passive scan.
+    """
+    report = ScanReport(findings=[])
+    assert report.scanners_run == []
+    assert report.sent_active_traffic is False

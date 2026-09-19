@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 380 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
+**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 396 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
 
 > This line said *"Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests."* for the whole of the build, including after the release. It was written when those two models were genuinely all there was, and then it stopped being updated while everything below it kept being.
 >
@@ -327,9 +327,69 @@ A sink is a **call**. A sink named in a comment or quoted in a string is not one
 
 **Values too, where the set is closed** — and one of those failed in the worst available direction. `dast.active.checks` was filtered with `{n: ALL_CHECKS[n] for n in names if n in ALL_CHECKS}`, so `["xss-reflcted"]` selected nothing: the active tier ran, tried no checks, found nothing, and handed back an empty result that reads exactly like a clean bill of health on an authorized penetration test. Four closed sets are now validated at load; two are derived from the enums that define them, and the two that cannot be imported without a cycle are asserted equal to their source of truth by tests rather than trusted as copies — [D43]'s lesson applied on the day the copy was made instead of a year later.
 
-**What this surfaced but did not fix.** A config file alone fully enables the intrusive active checks. Measured against a local echo server: `secscan http://host/ --config f.toml` with `dast.active.enabled` and `authorized_ack` set produces identical active findings to `--active --i-am-authorized`, with no flag in the command and **nothing printed to say attack traffic was sent**. The gate itself is sound — without the acknowledgement the actives do not run, and it warns. But `ScanReport` carries only findings and errors, so an active scan that happens to find nothing is indistinguishable from a passive one in the report, in stderr, and in shell history. For a tool whose README says unauthorized scanning is illegal, the report is the artifact you would keep as evidence of what you did, and it does not record what you did. `docs/configuration.md` warns about the key in the strongest terms available to a document; the report change is the real fix and is not in this entry.
+**What this surfaced but did not fix.** A config file alone fully enables the intrusive active checks. Measured against a local echo server: `secscan http://host/ --config f.toml` with `dast.active.enabled` and `authorized_ack` set produces identical active findings to `--active --i-am-authorized`, with no flag in the command and **nothing printed to say attack traffic was sent**. The gate itself is sound — without the acknowledgement the actives do not run, and it warns. But `ScanReport` carried only findings and errors, so an active scan that happened to find nothing was indistinguishable from a passive one in the report, in stderr, and in shell history. For a tool whose README says unauthorized scanning is illegal, the report is the artifact you would keep as evidence of what you did, and it does not record what you did. `docs/configuration.md` warns about the key in the strongest terms available to a document; the report change is the real fix and is [D50].
 
 **Why:** Every defect here is one shape: an instruction that was never carried out, and no output anywhere that says so. That is [D42] and [D46] moved from the scanner's findings to the scanner's own settings, which is the harder place to see it — a missing finding at least has a scanner behind it that someone might question, whereas a setting silently not applied has a file on disk that reads as if it worked. The reason it survived so long is worth naming too: the config surface had no user, because it had no documentation, so nobody was ever in a position to mistype a key and complain.
+
+### D50 — The report recorded what was found, not what was done
+
+[D49] surfaced this and deferred it: a config file with `dast.active.enabled` and
+`scope.authorized_ack` set sends injection payloads, traversal strings and probe
+requests to a host while the command is a bare `secscan https://host/`. No flag in
+shell history, no line on stderr, and nothing in the report. An active scan that
+found nothing looked exactly like a passive one.
+
+The README says unauthorized scanning is illegal in most jurisdictions regardless of
+intent. That makes the report the artifact you keep to show what you did to a host
+and when — and a list of findings cannot answer the only question that would ever be
+asked of it, which is whether you attacked the machine or only looked at it.
+
+`ScanReport` now carries `scanners_run` and `active_scanners_run`, populated by the
+engine, and all three renderers say so:
+
+```
+Ran: dast, dast-active
+ACTIVE CHECKS RAN. This scan sent attack-shaped requests (dast-active) to the target.
+```
+
+**Three choices in that, each of which could have gone the easy way.**
+
+- **Recorded from the selection, not from what produced findings.** A check that ran
+  and found nothing still sent the requests, and that is precisely the case the
+  disclosure exists for. Deriving the list from `report.findings` would have made the
+  line appear exactly when it was least needed.
+- **`active` comes from `cls.requires.active`, not from a `-active` name suffix.**
+  The suffix was the first thing I wrote and it is a naming convention wearing a
+  check's clothes: `requires.active` is the flag the gate itself reads, so anything
+  else is a second, weaker definition of "intrusive" that a rename could silently
+  falsify. This is the one field in the report where being quietly wrong is worse
+  than being absent.
+- **JSON omits the `scan` block entirely when nothing was recorded**, rather than
+  emitting `"sent_active_traffic": false`. A hand-built report — a fixture, an older
+  caller — genuinely does not know, and `false` is a claim. A pipeline gating on that
+  key should get a missing key it has to handle rather than a reassuring default it
+  will not question. My own first test for this passed while the renderer still
+  emitted the `false`, because it checked the terminal wording for all three formats;
+  the renderer was fixed and the test split.
+
+The terminal line sits directly under `Target:`, above the findings, and a test
+asserts that ordering rather than merely that the string is present somewhere — a
+disclosure below eighty findings is not a disclosure.
+
+**What it still does not fix.** The *invocation* remains silent. Shell history, CI
+logs and `ps` output show a bare `secscan https://host/`; only the report knows. That
+is inherent to the file being allowed to carry the acknowledgement at all, and the
+alternative — refusing `authorized_ack` from a file — would break the legitimate case
+of an authorized engagement with a checked-in scope file. `docs/configuration.md` says
+so in the section about that key.
+
+**Why:** A tool whose defaults are cautious and whose output is silent about having
+left them behind has the appearance of safety without the substance. The gate was
+sound the whole time — this was never a bypass — which is exactly what made it easy
+to miss: everything worked, and the working thing said nothing. [D42] and [D46] are
+the same shape one layer down, where a check that could not run at all produced an
+empty result that read as clean. Here the check ran, and the report read as though it
+had not.
 
 ---
 
