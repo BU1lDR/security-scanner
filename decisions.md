@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 355 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
+**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 357 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
 
 > This line said *"Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests."* for the whole of the build, including after the release. It was written when those two models were genuinely all there was, and then it stopped being updated while everything below it kept being.
 >

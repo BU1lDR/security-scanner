@@ -50,6 +50,11 @@ jobs:
       - name: Tests
         run: python -m pytest -q
 
+      # decisions.md quotes a test count. It was wrong three times, and each time
+      # the change that broke it was adding tests. Checked rather than remembered.
+      - name: The documented test count is the real one
+        run: python tools/check_test_count.py
+
       # The suite covers main() in-process. This covers the console script the
       # user actually types, which is a different thing: an entry point can be
       # misdeclared in pyproject.toml and every unit test still passes.
