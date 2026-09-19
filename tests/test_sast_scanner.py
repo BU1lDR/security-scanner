@@ -1,6 +1,7 @@
 """The SAST orchestrator: walk a tree, match, honour config, isolate faults."""
 
 import asyncio
+from pathlib import Path
 
 from scanner.core.config import Config
 from scanner.core.context import ScanContext
@@ -30,6 +31,45 @@ def test_requires_code_only():
     assert SastScanner.requires.url is False
     assert SastScanner.requires.active is False
     assert SastScanner.name == "sast"
+
+
+# The two tests below cover the path every real run takes and no test did: a
+# Config that was built without saying anything about exclude_dirs.
+#
+# _ctx() above passes config=None unless it is given overrides, so
+# test_exclude_dirs_pruned exercised an explicit list and everything else
+# exercised the None fallback. The default-config path — the only one a user
+# hits — was untested, and it was the broken one: DEFAULTS listed five directory
+# names while both scanners' fallbacks listed seven, and because a Config always
+# has DEFAULTS merged, the five won. venv/ and __pycache__/ were walked.
+
+def test_default_config_prunes_venv_and_pycache(tmp_path):
+    for d in ("venv/lib", ".venv/lib", "__pycache__", "src"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "planted.py").write_bytes(b"AWS_KEY = 'AKIA2E0A8F3B244C9986'\n")
+
+    target = Target(code_path=str(tmp_path), scope=Scope())
+    ctx = ScanContext(
+        target=target, scope=target.scope, http=None, config=Config.from_dict({})
+    )
+
+    # str(Path.relative_to), so the separator is the platform's.
+    paths = {f.location.path for f in _collect(ctx)}
+    assert paths == {str(Path("src") / "planted.py")}
+
+
+def test_the_default_and_the_fallback_are_one_list():
+    """A scanner's fallback must not be able to disagree with DEFAULTS again."""
+    from scanner.core.config import DEFAULT_EXCLUDE_DIRS, DEFAULTS
+    from scanner.scanners.sast.scanner import _DEFAULT_EXCLUDES as sast_fallback
+    from scanner.scanners.sca.scanner import _DEFAULT_EXCLUDES as sca_fallback
+
+    assert DEFAULTS["sast"]["exclude_dirs"] == DEFAULT_EXCLUDE_DIRS
+    assert DEFAULTS["sca"]["exclude_dirs"] == DEFAULT_EXCLUDE_DIRS
+    assert sast_fallback is DEFAULT_EXCLUDE_DIRS
+    assert sca_fallback is DEFAULT_EXCLUDE_DIRS
+    # Named explicitly: these two are the entries the bug hid.
+    assert {"venv", "__pycache__"} <= set(DEFAULT_EXCLUDE_DIRS)
 
 
 def test_finds_sink_and_secret_across_a_tree(tmp_path):

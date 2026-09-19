@@ -20,6 +20,31 @@ from typing import Any
 
 from scanner import USER_AGENT
 
+#: Directory names pruned from any local walk, matched by name at any depth.
+#:
+#: One list, in one place, because there were three and they disagreed. This file
+#: held five entries; sast/scanner.py and sca/scanner.py each held a seven-entry
+#: copy adding ``venv`` and ``__pycache__``. Since a :class:`Config` always has
+#: DEFAULTS merged in, ``cfg.get("sast.exclude_dirs", _DEFAULT_EXCLUDES)`` never
+#: reached its own fallback — the five-entry list here won every real run and the
+#: seven-entry copies were dead code that read as if they were in force. The
+#: visible effect was that ``venv/`` and ``__pycache__/`` were scanned: point the
+#: tool at a project laid out the ordinary way and it walked the whole
+#: virtualenv, reporting findings in third-party code the user does not own.
+#:
+#: The two scanners now import this as their fallback, so the fallback and the
+#: default cannot drift apart again, and ``sca.exclude_dirs`` is spelled out below
+#: rather than left to a fallback — SAST and SCA were reading different lists.
+DEFAULT_EXCLUDE_DIRS: list[str] = [
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+]
+
 # The frozen v1 config surface (contract §14). Scanner-specific detail keys may
 # grow as each scanner is built; the shapes here match the documented namespace.
 DEFAULTS: dict[str, Any] = {
@@ -46,6 +71,7 @@ DEFAULTS: dict[str, Any] = {
     "sca": {
         "enabled": True,
         "ecosystems": ["PyPI", "npm"],
+        "exclude_dirs": list(DEFAULT_EXCLUDE_DIRS),
     },
     "dast": {
         "enabled": True,
@@ -66,7 +92,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "sast": {
         "enabled": True,
-        "exclude_dirs": [".git", "node_modules", ".venv", "dist", "build"],
+        "exclude_dirs": list(DEFAULT_EXCLUDE_DIRS),
         "min_confidence": "tentative",
     },
     "ai": {

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from packaging.version import InvalidVersion, Version
 
+from scanner.core.config import DEFAULT_EXCLUDE_DIRS
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.fix import Fix, FixKind
 from scanner.core.location import Location
@@ -41,7 +42,10 @@ from scanner.scanners.sca.manifests import (
 )
 from scanner.scanners.sca.osv import OsvClient, Vulnerability
 
-_DEFAULT_EXCLUDES = [".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"]
+# Imported rather than copied, for the reason given on DEFAULT_EXCLUDE_DIRS. This
+# one was reached, because "sca.exclude_dirs" was absent from the defaults — so
+# SCA pruned seven directory names while SAST pruned five, in the same run.
+_DEFAULT_EXCLUDES = DEFAULT_EXCLUDE_DIRS
 _DB_SEVERITY = {
     "CRITICAL": Severity.CRITICAL,
     "HIGH": Severity.HIGH,

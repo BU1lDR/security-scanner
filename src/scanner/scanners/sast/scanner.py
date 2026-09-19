@@ -11,13 +11,18 @@ There is no HTTP here — SAST is offline and needs only ``ctx.target.code_path`
 
 from __future__ import annotations
 
+from scanner.core.config import DEFAULT_EXCLUDE_DIRS
 from scanner.core.finding import Confidence, Finding
 from scanner.core.registry import register
 from scanner.core.scanner import Requires, Scanner
 from scanner.scanners.sast.matcher import scan_text
 from scanner.scanners.sast.walk import iter_source_files, read_text_file
 
-_DEFAULT_EXCLUDES = [".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"]
+# Imported rather than copied. This was a seven-entry literal and core/config.py's
+# default was a five-entry one; because a Config always has the defaults merged,
+# the literal here never ran and the two entries only it listed — venv and
+# __pycache__ — were not actually excluded from any scan.
+_DEFAULT_EXCLUDES = DEFAULT_EXCLUDE_DIRS
 _CONFIDENCE = {
     "tentative": Confidence.TENTATIVE,
     "firm": Confidence.FIRM,
