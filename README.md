@@ -90,6 +90,14 @@ python -m pytest -q --disable-socket --allow-hosts=127.0.0.1,::1
 
 CI also checks that the test count quoted in [decisions.md](decisions.md) is the number pytest actually collects, and — weekly, not per-commit — asks OSV whether the lowest version each dependency floor admits has a known vulnerability. That last one found `cryptography>=42` pointing at a version with fifteen advisories against it.
 
+And it scans this project with itself:
+
+```bash
+python tools/check_self_scan.py
+```
+
+Our own source has to come back with no SAST findings, *and* a deliberately planted `eval(request.body)` has to come back with one. Both directions, because a scanner that reports nothing passes the first test and one that reports everything passes the second. This used to fail badly — see D48.
+
 ## Want to know how it works?
 
 I kept a running log of every design decision, and a plain-language glossary of every security concept it touches, in [decisions.md](decisions.md). If you want to understand *why* it's built the way it is rather than just how to run it, start there.

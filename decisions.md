@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 357 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
+**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 367 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
 
 > This line said *"Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests."* for the whole of the build, including after the release. It was written when those two models were genuinely all there was, and then it stopped being updated while everything below it kept being.
 >
@@ -298,6 +298,24 @@ D42 fixed the case where an OSV *lookup* failed. This fixes four places where th
 **The first version of the script gave advice that left you exposed.** It suggested a floor by taking the highest "fixed in" across the advisories affecting the current floor, which for cryptography said `>=49`. 49 is still vulnerable: CVE-2026-69247 was introduced after 42, so querying at 42 never surfaces it, and the arithmetic cannot see what the query did not return. It now re-queries each candidate until one comes back clean and says "verified clean" only about a version it actually asked about. It also merged OSV's GHSA and PYSEC records for the same CVE, which had been printing cryptography's nine flaws as fifteen — the same aliasing the scanner handles in `_cluster_vulns`.
 
 **Why:** Both defects here are the house failure mode wearing different clothes. A floor nobody re-reads is [D44]'s documented-invariant-nothing-enforces, and a suggestion derived from the advisories you happened to fetch rather than from a query you actually made is [D42]'s empty-result-that-looks-clean. The pattern is the same each time: something that was true when written, in a place with no mechanism to notice it stopping being true.
+
+### D48 — The scanner could not read its own source without crying wolf
+
+`secscan ./src` reported seventeen findings against this project. Sixteen were the SAST rule pack detecting **its own rule definitions**. `eval\s*\(` matched the string literal `"Use of eval() on a dynamic value"`; `shell=True` matched the sentence in `matcher.py` explaining why `shell=True` lines are where passwords hide. The seventeenth, `sca.coverage.no-manifest` for a directory that has no manifest, was correct.
+
+A sink is a **call**. A sink named in a comment or quoted in a string is not one, and `scan_text` had no way to tell the difference because it matched raw lines. The fix asks Python's own tokenizer: `_inert_spans` collects the column ranges of every COMMENT and STRING token in the file, and a sink match starting inside one is dropped. `tokenize` rather than a regex for `#` or a quote counter, because those get triple-quoted strings, escaped quotes and `#`-inside-a-string wrong, and a precision guard that is itself imprecise only moves the false positives somewhere harder to see.
+
+**Three things the guard deliberately does not do.**
+
+- **Secret rules are exempt** (`if not rule.redact`). A hardcoded credential is *always* inside a string literal, so applying this to them would suppress every true positive the class exists to find. This is the one line in the change that matters most, and it has a test that plants an AWS key in a docstring.
+- **It does not suppress a call with a literal argument.** `eval("1 + " + user_input)` still reports: the `eval(` is code and only the argument is a string. eval() over a format string is a real vulnerability shape.
+- **It fails toward reporting.** A file `tokenize` cannot read — a template, a fragment, something simply broken — gets no guard rather than no scan. A false positive costs a reviewer a minute; a false negative is the thing the tool exists to prevent.
+
+**Two named limitations.** The guard is Python-only, because `tokenize` is; a JS sink quoted in a string still reports, so the JS rules keep exactly the precision they had, no better. And on 3.11 an f-string is a single STRING token, so `f"{eval(x)}"` is a false negative there; from 3.12 it tokenizes into pieces and the replacement field is correctly seen as code. Both are worse than perfect and better than sixteen false positives.
+
+**The CI step was the worse half of this.** `ci.yml` asserted that `secscan ./src` **exits 1**, with a comment claiming this proved the SAST path worked end to end. What it actually did was pin the noise as the expected result: the sixteen false positives had become load-bearing, and fixing them would have turned CI red. It is now `tools/check_self_scan.py`, which requires zero SAST findings against our own source *and* exit 1 on a planted `eval(request.body)` — both directions, because a scanner that reports nothing exits 0 on everything and one that reports everything exits 1 on everything, and a single-direction test cannot tell either from a working tool.
+
+**Why:** A scanner that cannot read its own source without producing sixteen false alarms is not credible about anyone else's, and the reason is arithmetic rather than reputational: at that rate the report is mostly noise, so the finding that matters gets skimmed past. Worth noticing how it got there — the rule pack is the *only* file in the project guaranteed to contain the text of every pattern it searches for, so the tool's own metadata was its worst input, and nobody scans their scanner. Measured directly: with the guard removed today the count is eighteen, not sixteen, because writing the prose in this entry's neighbouring code comments added two more. The false positives grew as the documentation did.
 
 ---
 

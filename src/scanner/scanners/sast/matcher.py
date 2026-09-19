@@ -32,6 +32,8 @@ Two invariants matter here:
 
 from __future__ import annotations
 
+import io
+import tokenize
 from pathlib import PurePath
 
 from scanner.core.finding import Confidence, Finding
@@ -46,6 +48,72 @@ from scanner.scanners.sast.rules import (
 )
 
 _DEFAULT_MAX_LINE_LEN = 2000  # skip minified/generated lines: noisy and slow
+
+_PY_SUFFIXES = frozenset({".py", ".pyw"})
+
+# Present from 3.12, where f-strings became several tokens instead of one STRING.
+_FSTRING_MIDDLE = getattr(tokenize, "FSTRING_MIDDLE", None)
+
+_EOL = 1 << 30  # "to the end of the line", for spans that continue past it
+
+
+def _inert_spans(text: str) -> dict[int, list[tuple[int, int]]]:
+    """Column ranges per line that are comment or string, not code.
+
+    Keyed by 1-based line number, each value a list of ``[start_col, end_col)``.
+
+    Why this exists: ``secscan ./src`` reported seventeen findings against this
+    project and sixteen were the SAST rule pack detecting its own rule
+    definitions. ``eval\\s*\\(`` matched the string literal
+    ``"Use of eval() on a dynamic value"`` and the docstring sentence explaining
+    what the rule does. A tool cannot scan its own source and produce nothing but
+    noise and still be believable about anyone else's.
+
+    Python's own tokenizer decides this, rather than a regex for ``#`` or a
+    quote-counting heuristic. Those get triple-quoted strings, escaped quotes and
+    ``#`` inside a string wrong, and a precision guard that is itself imprecise
+    just moves the false positives somewhere harder to see.
+
+    On 3.12+ an f-string arrives as FSTRING_START / FSTRING_MIDDLE / … so
+    ``f"{eval(x)}"`` still reports: the literal chunks are inert and the
+    replacement field is real code. On 3.11 the whole f-string is one STRING
+    token, so that one case is a false negative on the oldest Python supported
+    here. Named rather than hidden; the alternative was keeping sixteen false
+    positives to protect one.
+    """
+    spans: dict[int, list[tuple[int, int]]] = {}
+
+    def add(start: tuple[int, int], end: tuple[int, int]) -> None:
+        (srow, scol), (erow, ecol) = start, end
+        if srow == erow:
+            spans.setdefault(srow, []).append((scol, ecol))
+            return
+        # A multi-line string: to end-of-line on the first row, all of the middle
+        # rows, up to the closing quote on the last.
+        spans.setdefault(srow, []).append((scol, _EOL))
+        for row in range(srow + 1, erow):
+            spans.setdefault(row, []).append((0, _EOL))
+        spans.setdefault(erow, []).append((0, ecol))
+
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type in (tokenize.COMMENT, tokenize.STRING) or (
+                _FSTRING_MIDDLE is not None and token.type == _FSTRING_MIDDLE
+            ):
+                add(token.start, token.end)
+    except (tokenize.TokenError, SyntaxError, IndentationError, ValueError):
+        # Unparseable input — a template, a fragment, Python 4, a file that is
+        # simply broken. Return whatever was collected before the failure and let
+        # the rest of the file match unguarded. Fails toward reporting: a false
+        # positive wastes a reviewer's minute, a false negative is the whole
+        # reason the tool exists.
+        pass
+
+    return spans
+
+
+def _is_inert(spans: dict[int, list[tuple[int, int]]], lineno: int, col: int) -> bool:
+    return any(start <= col < end for start, end in spans.get(lineno, ()))
 
 
 def scan_text(
@@ -69,22 +137,39 @@ def scan_text(
     if not active:
         return []
 
+    # Tokenized once per file, not once per line: the tokenizer needs the whole
+    # text to know a triple-quoted string is still open three lines later.
+    inert = _inert_spans(text) if suffix.lower() in _PY_SUFFIXES else {}
+
     findings: list[Finding] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         if len(line) > max_line_len:
             continue
         for rule in active:
-            finding = _match_line(rule, line, path, lineno)
+            finding = _match_line(rule, line, path, lineno, inert)
             if finding is not None:
                 findings.append(finding)
     return findings
 
 
-def _match_line(rule: Rule, line: str, path: str, lineno: int) -> Finding | None:
+def _match_line(
+    rule: Rule,
+    line: str,
+    path: str,
+    lineno: int,
+    inert: dict[int, list[tuple[int, int]]],
+) -> Finding | None:
     match = rule.pattern.search(line)
     if match is None:
         return None
     if rule.negate is not None and rule.negate.search(line):
+        return None
+
+    # Sink rules only. A sink is a *call*, so one named in a comment or quoted in
+    # a string is not one. Secret rules are deliberately exempt: a hardcoded
+    # credential is always inside a string literal, and applying this to them
+    # would suppress every true positive the class exists to find.
+    if not rule.redact and _is_inert(inert, lineno, match.start()):
         return None
 
     value = match.group(rule.value_group) if rule.value_group else match.group(0)

@@ -108,3 +108,97 @@ def test_confidence_is_carried_from_the_rule():
     findings = scan_text("result = eval(x)\n", path="a.py")
     hit = [f for f in findings if f.rule_id == "sast.sink.python-eval"][0]
     assert hit.confidence is Confidence.FIRM
+
+
+# ── a sink named in a comment or a string is not a sink ──────────────────────
+#
+# `secscan ./src` reported seventeen findings against this project and sixteen
+# were the rule pack detecting its own rule definitions: `eval\s*\(` matching the
+# literal "Use of eval() on a dynamic value" and the docstring explaining it.
+#
+# The pair that matters most in this block is
+# test_a_real_call_is_still_flagged_beside_an_inert_one and
+# test_secret_rules_are_exempt_from_the_inert_guard. A precision guard is only
+# worth having if it is provably narrower than the thing it filters — every test
+# below could be made to pass by returning no findings at all.
+
+def test_sink_in_a_hash_comment_is_not_flagged():
+    findings = scan_text("# never use eval(x) here\n", path="a.py")
+    assert "sast.sink.python-eval" not in _ids(findings)
+
+
+def test_sink_in_a_trailing_comment_is_not_flagged():
+    findings = scan_text("x = 1  # not eval(x)\n", path="a.py")
+    assert "sast.sink.python-eval" not in _ids(findings)
+
+
+def test_sink_in_a_docstring_is_not_flagged():
+    findings = scan_text('"""Avoid eval(x) in new code."""\n', path="a.py")
+    assert "sast.sink.python-eval" not in _ids(findings)
+
+
+def test_sink_in_a_string_literal_is_not_flagged():
+    # The exact shape of the sixteen: this project's own rule metadata.
+    text = 'title = "Use of eval() on a dynamic value"\n'
+    assert "sast.sink.python-eval" not in _ids(scan_text(text, path="a.py"))
+
+
+def test_sink_inside_a_multiline_string_is_not_flagged():
+    # Needs the whole file to know the string is still open on line 3, which is
+    # why the tokenizer runs once per file rather than once per line.
+    text = 'S = """\nsome prose\neval(x)\nmore prose\n"""\n'
+    assert "sast.sink.python-eval" not in _ids(scan_text(text, path="a.py"))
+
+
+def test_a_real_call_is_still_flagged_beside_an_inert_one():
+    """The guard must not be a blanket off-switch for the rule."""
+    text = '"""Avoid eval(a)."""\nresult = eval(b)\n'
+    findings = [f for f in scan_text(text, path="a.py")
+                if f.rule_id == "sast.sink.python-eval"]
+    assert len(findings) == 1
+    assert findings[0].location.line == 2
+
+
+def test_a_call_with_a_string_argument_is_still_flagged():
+    # The `eval(` is code; only its argument is a literal. Suppressing this would
+    # miss eval() over a format string, which is a real vulnerability shape.
+    findings = scan_text('eval("1 + " + user_input)\n', path="a.py")
+    assert "sast.sink.python-eval" in _ids(findings)
+
+
+def test_secret_rules_are_exempt_from_the_inert_guard():
+    """A hardcoded credential is *always* in a string literal.
+
+    Applying the inert-span guard to secret rules would suppress every true
+    positive the class exists to find, so the guard checks rule.redact.
+    """
+    key = "AKIA2E0A8F3B244C9986"
+    assert "sast.secret.aws-access-key" in _ids(
+        scan_text(f'AWS_KEY = "{key}"\n', path="a.py")
+    )
+    # Even in a docstring, which is where a pasted credential often ends up.
+    assert "sast.secret.aws-access-key" in _ids(
+        scan_text(f'"""example: {key}"""\n', path="a.py")
+    )
+
+
+def test_unparseable_python_still_matches():
+    """Fails toward reporting.
+
+    A file the tokenizer cannot read gets no guard rather than no scan: a false
+    positive costs a reviewer a minute, a false negative is the thing the tool
+    exists to prevent.
+    """
+    findings = scan_text("def broken(:\n    eval(x)\n", path="a.py")
+    assert "sast.sink.python-eval" in _ids(findings)
+
+
+def test_javascript_is_not_guarded():
+    """Documents a real limitation rather than implying parity.
+
+    The guard is Python-only, because `tokenize` is. A JS sink quoted in a string
+    still reports, so the JS rules keep the precision they always had — no worse,
+    but not better either.
+    """
+    findings = scan_text('const help = "do not use eval() here";\n', path="a.js")
+    assert "sast.sink.js-eval" in _ids(findings)

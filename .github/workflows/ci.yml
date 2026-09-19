@@ -97,15 +97,16 @@ jobs:
           echo "exit=$code"
           test "$code" = "2"
 
-      # D14: 1 is "something at or above the threshold". Scanning our own source
-      # finds real matches, so this also proves the SAST path works end to end
-      # on the installed package rather than only on the source tree.
-      - name: A scan with findings exits 1
-        run: |
-          set +e
-          secscan ./src > report.txt
-          code=$?
-          set -e
-          cat report.txt
-          echo "exit=$code"
-          test "$code" = "1"
+      # D14: 0 is clean, 1 is "something at or above the threshold". Both
+      # directions, because either alone is passable by a broken scanner — one
+      # that reports nothing exits 0 on everything, one that reports everything
+      # exits 1 on everything.
+      #
+      # This step used to assert only that `secscan ./src` exits 1, on the
+      # reasoning that our own source contains real matches. It did not. All
+      # sixteen SAST findings were the rule pack matching its own rule
+      # definitions. The step was pinning the tool's worst output as its expected
+      # output — a green tick that made the noise load-bearing, so that removing
+      # it would have "broken CI". See D48.
+      - name: The exit code means something in both directions
+        run: python tools/check_self_scan.py
