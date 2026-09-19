@@ -1,0 +1,82 @@
+# Runs the suite on every Python this project says it supports, and checks the
+# installed command still behaves the way decisions.md D14 says it does.
+#
+# The matrix is not decoration. pyproject.toml declares requires-python = ">=3.11";
+# development happens on 3.14, so 3.11, 3.12 and 3.13 were a promise nothing had
+# ever tested. Either the floor is exercised or it should not be advertised.
+#
+# There is no network-blocking step here, deliberately. The README's claim that no
+# test touches the network is true, but pytest-socket cannot be used to prove it:
+# on Windows `asyncio.run()` builds a ProactorEventLoop, which opens a socket for
+# its own internal wakeup, so --disable-socket fails 115 tests that never go near
+# a host. A check that fails for the wrong reason is worse than no check.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # one old version failing should not hide the others
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # The suite covers main() in-process. This covers the console script the
+      # user actually types, which is a different thing: an entry point can be
+      # misdeclared in pyproject.toml and every unit test still passes.
+      - name: The installed command runs
+        run: secscan --help
+
+      # D14: 2 is a bad target. This case used to exit 0 — a typo'd path scanned
+      # nothing, found nothing, and reported success, which in a pipeline is a
+      # green tick meaning the scan never ran. Pinned here so it stays fixed.
+      - name: A missing path fails instead of passing quietly
+        run: |
+          set +e
+          secscan ./definitely-not-a-real-path
+          code=$?
+          set -e
+          echo "exit=$code"
+          test "$code" = "2"
+
+      # D14: 1 is "something at or above the threshold". Scanning our own source
+      # finds real matches, so this also proves the SAST path works end to end
+      # on the installed package rather than only on the source tree.
+      - name: A scan with findings exits 1
+        run: |
+          set +e
+          secscan ./src > report.txt
+          code=$?
+          set -e
+          cat report.txt
+          echo "exit=$code"
+          test "$code" = "1"

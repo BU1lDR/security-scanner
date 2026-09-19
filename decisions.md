@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 353 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
+**Status:** **v1.0.0 released.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 355 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to.
 
 > This line said *"Building v1 foundation (branch `feat/security-scanner-v1`). Core `Finding` and `Target`/`Scope` models exist with tests."* for the whole of the build, including after the release. It was written when those two models were genuinely all there was, and then it stopped being updated while everything below it kept being.
 >
@@ -73,8 +73,10 @@ The AI reads findings that the deterministic scanners already produced. It does 
 **Why:** If the AI were trusted to find bugs, it could "hallucinate" (make up) problems that aren't real. Keeping it downstream of proven findings keeps results trustworthy.
 
 ### D12 — Auto-fix is deliberately limited in v1
-The tool will **automatically apply** only the safe, easy-to-verify fixes: bumping a vulnerable dependency to a fixed version, and simple config/text edits — and only after the user confirms. For anything touching real application code, it shows a **diff (proposed change) that the user must approve**; it never silently rewrites code.
+Only two kinds of fix are ever eligible to be applied automatically: bumping a vulnerable dependency to a fixed version, and simple config/text edits — and then only after the user confirms. Anything touching real application code is a **diff (proposed change) the user must approve**; it is never silently rewritten.
 **Why:** Auto-editing code you can't verify is how you quietly break someone's project. Version bumps and config flags are low-risk and checkable; arbitrary code changes are not.
+
+**As shipped in v1, nothing is applied.** This entry read "the tool will **automatically apply**…", which describes an apply layer that was never built: there is no `--fix`, no `--apply`, and no code anywhere that edits a target file. What v1 actually ships is the *eligibility rule* — `Fix.apply_safe`, enforced in `core/fix.py.__post_init__`, which refuses to mark a code patch safe no matter who asks. The report states the classification and you make the change. The terminal reporter used to tag such fixes "auto-applicable", which sent readers looking for a flag that does not exist; it now says "safe to apply as-is", which is a claim about the change rather than about the tool. The gate is built, in other words, and the door behind it is not — which is the right order to build them in, but the two must not be described as one.
 
 ### D13 — Error handling: one broken check must not kill the whole scan
 If a single check crashes, it becomes a recorded "scan error" and the scan continues. Network errors get retried with backoff, then recorded.
@@ -97,7 +99,7 @@ The AI advisor uses the Anthropic Claude API by default, reached through a gener
 **Why:** The owner deferred this choice ("don't care right now"), so we take the sensible default — the strongest available models, with a design that doesn't lock us in. Multi-provider support is deferred, not blocked.
 
 ### D18 — Auto-fix scope confirmed as in D12
-Confirmed final: automatically apply only dependency version bumps and simple config/text edits (after user confirmation); all application-code changes are shown as an approved diff, never applied silently.
+Confirmed final: the only fixes ever *eligible* for automatic application are dependency version bumps and simple config/text edits (and then only after user confirmation); all application-code changes are shown as a diff to approve, never applied silently. See the "as shipped" note on D12 — v1 implements the eligibility rule and no apply step, so in v1 the scope is enforced by having nothing to enforce it against.
 **Why:** The owner deferred this choice, so the cautious scope from D12 stands.
 
 ### D19 — We ran a design review and froze an "integration contract"

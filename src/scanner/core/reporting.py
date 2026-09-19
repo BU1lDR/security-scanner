@@ -128,7 +128,12 @@ def _render_terminal(report: ScanReport, target) -> str:
                 if f.references:
                     lines.append(f"    refs: {', '.join(f.references)}")
                 if f.fix is not None:
-                    tag = "auto-applicable" if f.fix.apply_safe else "manual review"
+                    # "auto-applicable" invited the reader to go looking for the
+                    # flag that applies it. There isn't one: v1 ships no apply
+                    # layer at all, and apply_safe is a classification of the
+                    # fix, not a statement about what this tool will do for you.
+                    # The tag now describes the change itself.
+                    tag = "safe to apply as-is" if f.fix.apply_safe else "manual review"
                     lines.append(f"    fix ({tag}): {f.fix.description}")
             lines.append("")
 

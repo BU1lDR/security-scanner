@@ -104,8 +104,17 @@ def _classify_target(raw: str) -> tuple[str, str]:
 
     A ``http(s)://`` prefix is a URL; any other scheme is refused. An existing
     filesystem path is code. A bare hostname (``example.com[:port]``) is promoted
-    to an ``https://`` URL. Anything else is treated as a (possibly missing) code
-    path and left for the scanners/target validation to reject.
+    to an ``https://`` URL. Anything else is a bad target and raises.
+
+    That last case used to return ``("code", raw)`` and defer to "the
+    scanners/target validation" — which did not exist. ``Target`` is a value
+    object with no filesystem access (deliberately: six tests construct one with
+    ``code_path="./repo"`` to exercise scanner dispatch), and the scanners simply
+    walked a tree that was not there. So ``secscan ./scr``, one keystroke off
+    ``./src``, scanned nothing, found nothing, printed a report and exited 0. In a
+    CI pipeline that is a green tick that means the scan never ran, which is worse
+    than no scan at all — it is a scan you now believe in. D14 already assigned
+    "bad target" to exit 2; nothing ever raised to make it happen.
     """
     if raw.startswith(("http://", "https://")):
         return "url", raw
@@ -117,7 +126,13 @@ def _classify_target(raw: str) -> tuple[str, str]:
         return "code", raw
     if _HOSTLIKE.match(raw) and "." in raw:
         return "url", f"https://{raw}"
-    return "code", raw
+    # Resolved absolute path in the message, because the usual cause is being in
+    # a different directory than you thought, and the relative path you typed
+    # back at you does not help you see that.
+    raise ValueError(
+        f"No such code path: {raw!r} (looked for {Path(raw).resolve()}). "
+        "A target is a URL, a bare hostname, or a path that exists."
+    )
 
 
 def _cli_overrides(args: argparse.Namespace) -> dict:

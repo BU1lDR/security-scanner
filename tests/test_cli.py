@@ -83,6 +83,39 @@ def test_json_format_is_parseable(tmp_path, capsys):
     assert doc["findings"][0]["rule_id"] == "sast.secret.aws-access-key"
 
 
+def test_missing_code_path_is_exit_two_and_does_not_scan(tmp_path, capsys):
+    """A path that does not exist must fail, not scan nothing and pass.
+
+    The regression this guards is a silent one: `secscan ./scr` for `./src` used
+    to walk a tree that was not there, find nothing, and exit 0. A CI job wired
+    to that is permanently green for a scan that never ran. Asserting on the exit
+    code alone is not enough — a clean scan is also non-fatal — so this also
+    asserts the engine was never reached.
+    """
+    scanned = []
+
+    class _Tripwire(Engine):
+        async def run(self, *a, **kw):            # pragma: no cover - must not run
+            scanned.append(True)
+            raise AssertionError("the engine ran against a path that does not exist")
+
+    missing = tmp_path / "definitely-not-here"
+    code = main([str(missing)], engine=_Tripwire())
+
+    assert code == 2
+    assert scanned == []
+    err = capsys.readouterr().err
+    assert "No such code path" in err
+    # The resolved absolute path is in the message, because the usual cause is
+    # being somewhere other than where you thought you were.
+    assert str(missing.resolve()) in err
+
+
+def test_existing_path_is_still_classified_as_code(tmp_path):
+    """The guard above must not reject the valid case it sits next to."""
+    assert main([str(tmp_path)], engine=_code_engine([])) == 0
+
+
 def test_unknown_format_is_rejected_with_exit_two(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main([str(tmp_path), "--format", "bogus"], engine=_code_engine([]))

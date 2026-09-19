@@ -2,10 +2,17 @@
 
 # The one place the project's own identity is written down. Three things used to
 # state it and two of them were wrong: this said 0.1.0 while pyproject.toml said
-# 1.0.0, and the default User-Agent said "secscan/0.1" with a repo URL that 404s.
-# Two of those three go out over the network to every host the scanner touches,
-# which makes a stale copy worse than untidy — the operator of a scanned host
-# reads that header to find out who is knocking, and it pointed nowhere.
+# 1.0.0, and the default User-Agent said "secscan/0.1" pointing at
+# https://github.com/security-scanner.
+#
+# That URL was first described here as one that 404s. It does not: it returns 200
+# and is a real GitHub account, registered in March 2019, with no connection to
+# this project. That is worse than a dead link, not better. Two of these three
+# strings go out over the network to every host the scanner touches, and the
+# operator of a scanned host reads that header to find out who is knocking — so
+# what it pointed at was an uninvolved stranger's profile, for them to be asked
+# about traffic they did not send. A scanner that announces itself has to
+# announce itself correctly or the courtesy is worth nothing.
 #
 # So: pyproject.toml now reads __version__ from here (dynamic version), and
 # core/http.py and core/config.py both take USER_AGENT from here rather than
