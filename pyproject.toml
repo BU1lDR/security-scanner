@@ -1,5 +1,12 @@
+# Floors are the lowest version OSV reports nothing against, not the lowest
+# version that happens to work. setuptools 61 is installable and carries four
+# advisories, including CVE-2024-6345 (code execution through the package-index
+# download path) and CVE-2025-47273 (path traversal). Nobody's build env here
+# actually resolves that low — but "supported" is what this file says, and this
+# project's own SCA scanner would flag a floor like that in someone else's
+# manifest. Checked against api.osv.dev; see the note on dependencies below.
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,15 +26,29 @@ license = { text = "MIT" }
 # transport would bypass that gate, so it is not a dependency.
 # Deliberately no `lxml` either: the crawler parses with stdlib "html.parser"
 # (see scanners/dast/crawler.py), so the C-extension build was pure install cost.
+#
+# Every floor below is the lowest version with no OSV advisory against it, and
+# each was queried rather than guessed. cryptography>=42 was the bad one: 42.0.0
+# is installable and carries fifteen advisories, four of them HIGH. It is raised
+# to 50, which is where CVE-2026-69247 (a Bleichenbacher oracle in PKCS#7
+# EnvelopedData decryption) is fixed — not a path this scanner walks, but a floor
+# is a claim about what is supported, not about what today's lockfile resolves.
+#
+# httpx 0.27.0, beautifulsoup4 4.12.0 and packaging 24.0 each come back clean, so
+# those floors are left where they are. Raising a floor that does not need it only
+# costs users compatibility.
 dependencies = [
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
-    "cryptography>=42",
+    "cryptography>=50",
     "packaging>=24",
 ]
 
+# pytest 8.0.0 is affected by CVE-2025-71176, fixed in 9.0.3. Dev-only, so the
+# blast radius is a contributor's machine rather than a user's — which is an
+# argument for the floor being cheap to raise, not for leaving it.
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=9.0.3"]
 
 [project.scripts]
 secscan = "scanner.cli:main"

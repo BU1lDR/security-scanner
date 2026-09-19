@@ -1,0 +1,69 @@
+# Asks OSV whether the lowest version each dependency floor admits is vulnerable.
+#
+# Separate from ci.yml on purpose. This check's answer depends on what OSV
+# published today, not on what the commit changed, so running it per-push would
+# redden unrelated pull requests on the morning a new advisory lands — and a check
+# that fails for reasons the author did not cause is a check people learn to
+# ignore. ci.yml holds the checks whose answers depend only on the tree.
+#
+# It runs on a timer, and the timer is the point: cryptography>=42 sat in
+# pyproject.toml until 42.0.0 had fifteen advisories against it, four of them
+# HIGH, and nothing noticed, because every environment anyone actually built
+# resolved far above it. A floor is a claim about what is supported; nobody
+# re-reads it.
+#
+# Two things to know about scheduled workflows: they only run from the default
+# branch, and GitHub disables them after 60 days with no repository activity. If
+# this has not run in a while, that is the likeliest reason rather than a clean
+# result — check the run history, not the absence of email.
+name: Dependency floors
+
+on:
+  schedule:
+    # Mondays, 06:17 UTC. Not on the hour: scheduled runs bunch up at :00 and get
+    # queued, which for a weekly check means an unpredictable delay for nothing.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  push:
+    # Only when the floors themselves change. That is the one push where this
+    # check's answer is about the commit, so it belongs on the commit.
+    paths:
+      - 'pyproject.toml'
+      - 'tools/check_floors.py'
+      - '.github/workflows/dependency-floors.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  floors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      # No install step and no dependencies: the script is stdlib-only so it can
+      # run before — and independently of — the environment whose floors it is
+      # checking. A tool that needs the package installed to tell you the
+      # package's install metadata is wrong is a tool with a cycle in it.
+      - name: Query OSV for every declared floor
+        run: python tools/check_floors.py
+
+      # Runs even when the step above fails, so a failure report still carries the
+      # machine-readable detail rather than only the console rendering.
+      - name: Attach the full answer
+        if: always()
+        run: python tools/check_floors.py --json > floors.json || true
+
+      # v7, not the v4 that most examples still show: v4 runs on Node 20, which
+      # Actions has deprecated. Same reason checkout and setup-python above are on
+      # v7 rather than the v4/v5 pair this repo shipped with.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dependency-floors
+          path: floors.json
+          retention-days: 90

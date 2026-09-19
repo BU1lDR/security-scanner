@@ -287,6 +287,18 @@ D42 fixed the case where an OSV *lookup* failed. This fixes four places where th
 
 **Why:** This tool's entire value is what a clean report means. Each gap above quietly converted a limitation of the scanner into a claim about the target. D42 made that argument for a lookup that failed; it holds more strongly for a lookup that never happened, because there is no outage, no error, and nothing anomalous for anyone to notice. A PHP shop could have run this over their codebase, seen an empty dependency section, and concluded their dependencies were checked. Not one line of this adds a capability — it only stops the tool overstating the ones it already has, which is the difference between a scanner someone can rely on and one they merely enjoy the output of.
 
+### D47 — Our own dependency floors are a claim, and it was false
+
+`pyproject.toml` declared `cryptography>=42`. OSV reports fifteen advisories against 42.0.0, four of them HIGH. `setuptools>=61` admitted four, including CVE-2024-6345 (code execution through the package-index download path). `pytest>=8` admitted CVE-2025-71176.
+
+**Nothing was actually vulnerable.** Every environment anyone built resolved to cryptography 50 and pytest 9. That is exactly why it went unnoticed for the whole life of the project, and it is not a defence: a floor is a published statement that the named version is a supported install. This tool's SCA scanner would flag a floor like that in someone else's manifest, and it would be right to. Floors are now `cryptography>=50`, `setuptools>=83`, `pytest>=9.0.3` — each the lowest version OSV reports nothing against, each queried rather than guessed. `httpx>=0.27`, `beautifulsoup4>=4.12` and `packaging>=24` came back clean and were left alone; raising a floor that does not need it only costs users compatibility.
+
+**Checked on a timer, not on a commit.** `tools/check_floors.py` asks OSV about every `>=` floor in `pyproject.toml`; `.github/workflows/dependency-floors.yml` runs it weekly, on demand, and on pushes that touch the floors themselves. It is deliberately *not* in `ci.yml`, because its answer depends on what OSV published today rather than on what the commit changed — a check that turns an unrelated pull request red on the morning a new advisory lands is a check contributors learn to ignore. `ci.yml` holds the checks whose answers depend only on the tree. The script is stdlib-only so it can run without installing the package whose install metadata it is auditing; a tool with that cycle in it is unusable at the moment you need it.
+
+**The first version of the script gave advice that left you exposed.** It suggested a floor by taking the highest "fixed in" across the advisories affecting the current floor, which for cryptography said `>=49`. 49 is still vulnerable: CVE-2026-69247 was introduced after 42, so querying at 42 never surfaces it, and the arithmetic cannot see what the query did not return. It now re-queries each candidate until one comes back clean and says "verified clean" only about a version it actually asked about. It also merged OSV's GHSA and PYSEC records for the same CVE, which had been printing cryptography's nine flaws as fifteen — the same aliasing the scanner handles in `_cluster_vulns`.
+
+**Why:** Both defects here are the house failure mode wearing different clothes. A floor nobody re-reads is [D44]'s documented-invariant-nothing-enforces, and a suggestion derived from the advisories you happened to fetch rather than from a query you actually made is [D42]'s empty-result-that-looks-clean. The pattern is the same each time: something that was true when written, in a place with no mechanism to notice it stopping being true.
+
 ---
 
 ## Part 3 — Concepts Glossary (plain language)
