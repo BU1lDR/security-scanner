@@ -75,6 +75,21 @@ secscan https://your-own-site.com --active --i-am-authorized
 
 Only run those against something you own or have permission to test. The payloads are built to *detect* problems, not exploit them, but the rule still stands.
 
+## Running the tests
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+```
+
+Nothing in the suite touches the network — no live host, no OSV, no API key, so it runs the same on a plane as in CI. That isn't a promise you have to take on trust: CI runs the whole suite a second time with sockets blocked, allowing only loopback, because `asyncio` opens a socketpair for its own wakeup and blocking that would fail tests for reasons unrelated to the claim.
+
+```bash
+python -m pytest -q --disable-socket --allow-hosts=127.0.0.1,::1
+```
+
+CI also checks that the test count quoted in [decisions.md](decisions.md) is the number pytest actually collects, and — weekly, not per-commit — asks OSV whether the lowest version each dependency floor admits has a known vulnerability. That last one found `cryptography>=42` pointing at a version with fifteen advisories against it.
+
 ## Want to know how it works?
 
 I kept a running log of every design decision, and a plain-language glossary of every security concept it touches, in [decisions.md](decisions.md). If you want to understand *why* it's built the way it is rather than just how to run it, start there.

@@ -47,8 +47,12 @@ dependencies = [
 # pytest 8.0.0 is affected by CVE-2025-71176, fixed in 9.0.3. Dev-only, so the
 # blast radius is a contributor's machine rather than a user's — which is an
 # argument for the floor being cheap to raise, not for leaving it.
+#
+# pytest-socket is what makes the README's "no test touches the network" claim
+# checkable instead of merely true. 0.7.0 and up are clean per OSV; the floor is
+# 0.7.0 because that is where --allow-hosts behaves as the CI step relies on.
 [project.optional-dependencies]
-dev = ["pytest>=9.0.3"]
+dev = ["pytest>=9.0.3", "pytest-socket>=0.7"]
 
 [project.scripts]
 secscan = "scanner.cli:main"

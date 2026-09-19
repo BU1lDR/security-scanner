@@ -5,11 +5,22 @@
 # development happens on 3.14, so 3.11, 3.12 and 3.13 were a promise nothing had
 # ever tested. Either the floor is exercised or it should not be advertised.
 #
-# There is no network-blocking step here, deliberately. The README's claim that no
-# test touches the network is true, but pytest-socket cannot be used to prove it:
-# on Windows `asyncio.run()` builds a ProactorEventLoop, which opens a socket for
-# its own internal wakeup, so --disable-socket fails 115 tests that never go near
-# a host. A check that fails for the wrong reason is worse than no check.
+# The network-blocking step below exists because the paragraph that used to sit
+# here was wrong. It said pytest-socket could not prove the "no test touches the
+# network" claim, because on Windows `asyncio.run()` builds a
+# ProactorEventLoop that opens a socket for its own internal wakeup and
+# --disable-socket therefore failed 115 tests that never go near a host.
+#
+# The observation was real; the conclusion did not follow. That wakeup socket is a
+# loopback pair, so --allow-hosts=127.0.0.1,::1 permits it and blocks everything
+# else. Measured on Windows, where the objection was supposed to be strongest: the
+# full suite passes with sockets off, and a test that opens a real connection to
+# api.osv.dev fails. Both halves checked, because a block that passes everything
+# is indistinguishable from no block.
+#
+# Worth keeping the wrong version in view: it was an argument for why a check was
+# impossible, it was written by whoever would have had to build the check, and
+# nobody was going to audit it. That is the shape to distrust.
 name: CI
 
 on:
@@ -49,6 +60,19 @@ jobs:
 
       - name: Tests
         run: python -m pytest -q
+
+      # The suite again, with the network taken away. Loopback stays allowed:
+      # asyncio's event loop builds its own self-wakeup socketpair, which is
+      # AF_INET on Windows, and blocking that would fail tests for a reason that
+      # has nothing to do with the claim being checked.
+      #
+      # This is a second full run rather than a permanent addopts entry, on
+      # purpose. Under --disable-socket a test that starts reaching out fails with
+      # a pytest-socket error instead of a connection error, which is a confusing
+      # thing to hand someone debugging locally. The unrestricted run above is the
+      # one whose failures are worth reading; this one answers one question.
+      - name: No test touches the network
+        run: python -m pytest -q --disable-socket --allow-hosts=127.0.0.1,::1
 
       # decisions.md quotes a test count. It was wrong three times, and each time
       # the change that broke it was adding tests. Checked rather than remembered.
