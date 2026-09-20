@@ -129,12 +129,211 @@ def test_crawl_does_not_refetch_a_visited_page():
 
 
 def test_crawl_skips_non_html_responses():
+    """A non-HTML body is fetched and recorded, and parsed for nothing.
+
+    This test used to assert that a JSON page contributed no query parameters —
+    which it never had, so the assertion held with the content-type check deleted.
+    The claim is about *parsing*, so the JSON body now contains a link and a form
+    that would both be picked up if the guard went away.
+    """
     pages = {
         "https://example.com/": _Resp('<a href="/data.json">d</a>'),
         "https://example.com/data.json": _Resp(
-            '{"a":1}', content_type="application/json"
+            '{"a":1}<a href="/hidden">x</a><form action="/post"><input name="q">'
+            "</form>",
+            content_type="application/json",
         ),
     }
+    result, http = _crawl("https://example.com/", pages)
+    assert "https://example.com/data.json" in {p.url for p in result.pages}
+    assert result.forms == []
+    assert "https://example.com/hidden" not in http.gets
+
+
+# ── what the crawl could not read ────────────────────────────────────────────
+#
+# The crawl walks past its own failures so one dead link cannot sink it, and that
+# is only defensible if walking past them is recorded. Until it was, a site that
+# refused, timed out or 5xx'd produced a byte-identical result to a site with
+# nothing on it — same pages, same forms, same empty report, same exit 0. See D59.
+
+class _FailingHttp:
+    """Raises for the URLs named, serves canned pages for the rest."""
+
+    def __init__(self, pages: dict, failures: dict):
+        self._pages = pages
+        self._failures = failures
+        self.gets: list[str] = []
+
+    async def get(self, url, **kwargs):
+        self.gets.append(url)
+        if url in self._failures:
+            raise self._failures[url]
+        if url in self._pages:
+            return self._pages[url]
+        return _Resp("", status_code=404)
+
+
+def _kinds(result) -> list[str]:
+    return [p.kind for p in result.problems]
+
+
+def test_a_fetch_that_raises_is_recorded_not_swallowed():
+    pages = {
+        "https://example.com/": _Resp('<a href="/dead">d</a><a href="/live">l</a>'),
+        "https://example.com/live": _Resp("fine"),
+    }
+    http = _FailingHttp(pages, {"https://example.com/dead": OSError("connection reset")})
+    result = asyncio.run(crawl("https://example.com/", http, _scope("example.com")))
+
+    # The rest of the walk still happened — that part was never the problem.
+    assert "https://example.com/live" in {p.url for p in result.pages}
+    failed = [p for p in result.problems if p.kind == "fetch-failed"]
+    assert [p.url for p in failed] == ["https://example.com/dead"]
+    # The class name is in the reason: OSError and TimeoutError need different fixes,
+    # and several httpx exceptions stringify to nothing at all.
+    assert "OSError" in failed[0].detail
+    assert failed[0] in result.incomplete()
+
+
+def test_a_server_error_is_a_coverage_gap_and_a_404_is_not():
+    """Both are pages we did not read; only one means the scanner's picture of the
+    site is smaller than it should be. Exit 3 on every dead link would fire on most
+    real sites and stop meaning anything."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/broken">b</a><a href="/gone">g</a>'),
+        "https://example.com/broken": _Resp("oops", status_code=503),
+        "https://example.com/gone": _Resp("nope", status_code=404),
+    }
     result, _ = _crawl("https://example.com/", pages)
-    # It may be fetched, but a JSON body must not contribute forms/parsed links.
-    assert all(not p.url.endswith("data.json") or p.params == () for p in result.pages)
+    by_kind = {p.kind: p for p in result.problems}
+    assert by_kind["server-error"].url == "https://example.com/broken"
+    assert by_kind["unreadable"].url == "https://example.com/gone"
+    assert [p.kind for p in result.incomplete()] == ["server-error"]
+
+
+def test_a_clean_crawl_reports_no_problems():
+    """The other direction. Every assertion above is passed by a crawler that
+    complains about everything."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp("leaf"),
+    }
+    result, _ = _crawl("https://example.com/", pages)
+    assert result.problems == []
+    assert result.incomplete() == []
+
+
+def test_max_pages_truncation_says_so():
+    """docs/configuration.md has promised since it was written that reaching this
+    bound "is logged, never a silent truncation". There was no logging in the module
+    at all: the walk stopped and the result looked like a small site."""
+    links = "".join(f'<a href="/p{i}">{i}</a>' for i in range(20))
+    pages = {"https://example.com/": _Resp(links)}
+    for i in range(20):
+        pages[f"https://example.com/p{i}"] = _Resp("leaf")
+    result, http = _crawl("https://example.com/", pages, max_pages=3)
+    assert len(http.gets) <= 3
+    truncated = [p for p in result.problems if p.kind == "truncated"]
+    assert len(truncated) == 1
+    assert "max_pages=3" in truncated[0].detail
+    # 20 links found on the entry page, 2 of them read before the bound.
+    assert "18 discovered links" in truncated[0].detail
+    assert truncated[0] in result.incomplete()
+
+
+def test_the_truncation_count_does_not_double_count_a_link_seen_twice():
+    """The sentence's only job is to size the gap, so the number has to be URLs and
+    not queue entries — two pages linking to the same third page queue it twice."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a><a href="/b">b</a>'),
+        "https://example.com/a": _Resp('<a href="/shared">s</a>'),
+        "https://example.com/b": _Resp('<a href="/shared">s</a>'),
+        "https://example.com/shared": _Resp("leaf"),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_pages=3)
+    truncated = [p for p in result.problems if p.kind == "truncated"]
+    assert "1 discovered links" in truncated[0].detail
+
+
+def test_reaching_max_depth_is_not_truncation():
+    """max_depth is a shape, max_pages is a ceiling. A depth-bounded walk that
+    drained its queue read everything it meant to, and must not claim otherwise —
+    otherwise the default settings would report an incomplete scan of every site."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp('<a href="/deep">deep</a>'),
+        "https://example.com/deep": _Resp("too far"),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=1)
+    assert "truncated" not in _kinds(result)
+
+
+def test_one_malformed_href_does_not_discard_the_pages_already_collected():
+    """`urljoin` raises ValueError on `href="http://["`, and that call was unguarded
+    inside the walk: the exception left `crawl`, the caller caught it, and every page
+    and form collected up to that point went with it. The active tier then had zero
+    injection points and the report described a fully-scanned, clean site."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp(
+            '<a href="http://[">bad</a><a href="/b">b</a>'
+        ),
+        "https://example.com/b": _Resp("leaf"),
+    }
+    result, _ = _crawl("https://example.com/", pages)
+    urls = {p.url for p in result.pages}
+    assert "https://example.com/" in urls          # collected before the bad href
+    assert "https://example.com/b" in urls         # and the good sibling link
+    bad = [p for p in result.problems if p.kind == "bad-link"]
+    assert len(bad) == 1
+    assert "http://[" in bad[0].detail
+    assert bad[0].url == "https://example.com/a"   # the page it was found on
+
+
+def test_a_malformed_form_action_does_not_discard_the_other_forms():
+    html = (
+        '<form action="http://["><input name="a"></form>'
+        '<form action="/ok" method="post"><input name="b"></form>'
+    )
+    pages = {"https://example.com/": _Resp(html)}
+    result, _ = _crawl("https://example.com/", pages)
+    assert [f.url for f in result.forms] == ["https://example.com/ok"]
+    assert [p.kind for p in result.problems] == ["bad-link"]
+
+
+def test_an_out_of_scope_entry_url_is_recorded_rather_than_returning_nothing():
+    """"The target was not inside its own scope" and "the site has no pages" were
+    the same empty result. Only the entry URL can reach this: links are scope-checked
+    before they are queued."""
+    result, http = _crawl("https://elsewhere.com/", {}, hosts=("example.com",))
+    assert result.pages == []
+    assert http.gets == []                          # refused before any request
+    assert _kinds(result) == ["out-of-scope"]
+    assert result.incomplete()
+
+
+def test_an_unexpected_failure_keeps_what_was_already_collected():
+    """The backstop. `crawl` cannot enumerate every way a third party's markup can
+    break a parser, so the guarantee is structural: whatever the walk had appended is
+    returned, with the failure named beside it."""
+    class _ExplodingScope:
+        def __init__(self):
+            self.calls = 0
+
+        def allows(self, url):
+            self.calls += 1
+            if self.calls > 2:
+                raise RuntimeError("scope went bang")
+            return True
+
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp("leaf"),
+    }
+    result = asyncio.run(crawl("https://example.com/", _FakeHttp(pages), _ExplodingScope()))
+    assert [p.url for p in result.pages] == ["https://example.com/"]
+    failed = [p for p in result.problems if p.kind == "crawl-failed"]
+    assert len(failed) == 1
+    assert "RuntimeError: scope went bang" == failed[0].detail
+    assert failed[0] in result.incomplete()

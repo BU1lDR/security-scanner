@@ -182,7 +182,7 @@ you have a specific need for it to be ambient.
 | `dast.tls.enabled` | `true` | Certificate and protocol checks. |
 | `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups). |
 | `dast.crawler.max_depth` | `2` | Link depth from the entry URL. |
-| `dast.crawler.max_pages` | `50` | Hard page ceiling. Hitting it is logged, never a silent truncation. |
+| `dast.crawler.max_pages` | `50` | Hard page ceiling. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
 | `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. |
 | `dast.crawler.user_agent` | unset | Overrides `http.user_agent` for crawl traffic only. Leave unset to use one identity throughout. |
 

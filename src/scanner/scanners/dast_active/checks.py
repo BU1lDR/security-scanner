@@ -128,24 +128,37 @@ def _params_with(point, value: str) -> list[tuple[str, str]]:
 
 
 async def _send(http, point, value: str):
+    """Send one probe. Failures propagate on purpose.
+
+    This used to catch ``Exception`` and return ``None``, on the reasoning that a
+    failed probe is not a finding. True, and not the whole question: a probe that
+    never got an answer is not a *negative* either, and every check below reads a
+    missing response as one — no marker came back, no database error appeared, no
+    redirect was issued. So a timeout, a connection reset, a rate-limit refusal and
+    a parameter that is genuinely safe all produced the same silence, and the report
+    said the parameter had been tested.
+
+    Nothing here needs a local handler. ``ScanContext.run_check`` wraps every
+    (point, check) pair already, so the failure is recorded as a ``ScanError``, the
+    remaining checks continue, and the scan exits 3 instead of 0 when that error is
+    all there is. Fault isolation was always in place; this function was the one
+    thing standing between the failure and it (D59).
+    """
     params = _params_with(point, value)
-    try:
-        if point.where == "body":
-            # Encode the body ourselves rather than passing the pairs to `data=`.
-            # httpx only form-encodes `data=` when it is a Mapping; given a list
-            # it falls back to raw-content encoding and builds a *sync* byte
-            # stream, which AsyncClient then refuses outright. Hand-encoding also
-            # keeps duplicate field names (checkbox groups), which dict() would
-            # collapse.
-            return await http.post(
-                point.url,
-                active=True,
-                content=urlencode(params),
-                headers={"content-type": "application/x-www-form-urlencoded"},
-            )
-        return await http.get(point.url, active=True, params=params)
-    except Exception:  # noqa: BLE001 - a failed probe is not a finding
-        return None
+    if point.where == "body":
+        # Encode the body ourselves rather than passing the pairs to `data=`.
+        # httpx only form-encodes `data=` when it is a Mapping; given a list
+        # it falls back to raw-content encoding and builds a *sync* byte
+        # stream, which AsyncClient then refuses outright. Hand-encoding also
+        # keeps duplicate field names (checkbox groups), which dict() would
+        # collapse.
+        return await http.post(
+            point.url,
+            active=True,
+            content=urlencode(params),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+    return await http.get(point.url, active=True, params=params)
 
 
 async def _baseline(http, point):

@@ -15,14 +15,23 @@ Isolation and bounding: the crawl and every (check, point) run are fault-isolate
 (one crash is recorded, the rest continue), and total active traffic is capped by
 ``dast.active.max_requests`` — when the budget is reached we stop and log how many
 checks were skipped rather than silently pretending the surface was fully covered.
+
+Fault-isolated is not the same as silent, and this scanner is where the difference
+matters most. What it could not read, it records: pages the crawl failed to fetch
+become ``ScanError``s so the run exits 3 rather than 0, and hosts the request gate
+refused become ``ScanSkip``s so "we were not allowed to test that" is told apart
+from "we tested it and it was fine" (D58, D59).
 """
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from scanner.core.finding import Finding
+from scanner.core.gate import OutOfScopeError
 from scanner.core.registry import register
 from scanner.core.scanner import Requires, Scanner
-from scanner.scanners.dast.crawler import CrawlResult, crawl
+from scanner.scanners.dast.crawler import INCOMPLETE_KINDS, CrawlResult, crawl
 from scanner.scanners.dast_active.checks import ALL_CHECKS
 from scanner.scanners.dast_active.injection import injection_points
 
@@ -70,13 +79,15 @@ class DastActiveScanner(Scanner):
 
         counted = _CountingHttp(ctx.http)
         skipped = 0
+        refused: dict[str, int] = {}
         for point in points:
             for name, check in checks.items():
                 if counted.count >= max_requests:
                     skipped += 1
                     continue
                 for finding in await ctx.run_check(
-                    "dast-active", f"{name}", check(point, counted)
+                    "dast-active", f"{name}",
+                    self._check_unless_refused(check(point, counted), point, refused),
                 ):
                     yield finding
         if skipped:
@@ -84,12 +95,46 @@ class DastActiveScanner(Scanner):
                 "dast-active: request budget (%d) reached; %d (point, check) "
                 "combinations were not run.", max_requests, skipped,
             )
+            ctx.emit_skip(
+                "dast-active",
+                f"the request budget (dast.active.max_requests = {max_requests}) was "
+                f"reached, so {skipped} (injection point, check) combinations were "
+                f"not run",
+                check="budget",
+            )
+        for host, count in sorted(refused.items()):
+            ctx.emit_skip(
+                "dast-active",
+                f"{count} checks were not run against {host}: the request gate "
+                f"refused them, so that host was crawled but never tested",
+                check="gate",
+            )
+
+    @staticmethod
+    async def _check_unless_refused(coro, point, refused: dict[str, int]):
+        """Await one check, telling a refusal apart from a failure.
+
+        A gate refusal is not a crash and must not be recorded as one: it means this
+        host is in scope to look at but not in ``scope.active_allowlist``, which is a
+        deliberate configuration and would put every such run at exit 3. It is not
+        nothing either — before this, ``_send`` swallowed the ``OutOfScopeError`` and
+        the check read the missing response as a clean negative, so a host the
+        operator had deliberately excluded from testing appeared in the report as a
+        host that had been tested and found sound. It is a skip, tallied per host and
+        emitted once. Every other exception propagates to ``run_check``.
+        """
+        try:
+            return await coro
+        except OutOfScopeError:
+            host = urlsplit(point.url).hostname or point.url
+            refused[host] = refused.get(host, 0) + 1
+            return []
 
     async def _safe_crawl(self, ctx) -> CrawlResult:
         try:
             cfg = ctx.config
             c = (cfg.get("dast.crawler", {}) if cfg else {}) or {}
-            return await crawl(
+            result = await crawl(
                 ctx.target.url,
                 ctx.http,
                 ctx.scope,
@@ -100,6 +145,34 @@ class DastActiveScanner(Scanner):
         except Exception as exc:  # noqa: BLE001 - a failed crawl must not sink the scan
             ctx.emit_error("dast-active", "crawl", exc)
             return CrawlResult()
+        self._record_crawl_problems(ctx, result)
+        return result
+
+    @staticmethod
+    def _record_crawl_problems(ctx, result: CrawlResult) -> None:
+        """Turn what the crawl could not read into report entries.
+
+        The crawl walks past its own failures by design — one dead link must not sink
+        the rest — and that is only defensible if walking past them is recorded. A
+        page that refused, timed out or 5xx'd narrows the surface the active tier can
+        test, and an injection point that was never discovered cannot produce a
+        finding, so the report would otherwise describe a smaller site as a cleaner
+        one. Those become errors, which is what moves the exit code to 3.
+
+        A 4xx is logged and no more. Dead links are ordinary on real sites, and an
+        exit code that fires on all of them carries no information.
+        """
+        for problem in result.problems:
+            if problem.kind in INCOMPLETE_KINDS:
+                ctx.emit_failure(
+                    "dast-active", "crawl",
+                    f"{problem.kind}: {problem.url} — {problem.detail}",
+                )
+            else:
+                ctx.logger.info(
+                    "dast-active: crawl skipped %s (%s: %s)",
+                    problem.url, problem.kind, problem.detail,
+                )
 
     @staticmethod
     def _selected_checks(cfg):

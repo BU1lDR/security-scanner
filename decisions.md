@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 466 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 481 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1146,6 +1146,93 @@ said, in as many words, that attack traffic went out. That it survived [D50]'s o
 describing it, and then a gate assertion written to hold it in place, is the part worth
 keeping in view: writing the defect down is not the same as the defect being cheap to live
 with, and "known" quietly becomes "intended" if nothing forces the question again.
+
+---
+
+### D59 — Three handlers, one lie: "we could not look" read as "we found nothing"
+[D58] gave the report a channel for work that was declined. This is the same sentence one
+layer down, in the code that does the looking. Four places caught a failure, handled it
+politely, and returned the value that means *nothing was there* — so a site that could not be
+walked and a site with nothing on it produced byte-identical output, down to the exit code.
+
+**`crawler._get` caught `Exception` and returned `None`.** The caller read `None` as "no page
+here" and moved on. A DNS failure, a TLS handshake the target rejected, a read timeout, a
+connection reset under load, and a 200 with no links all reached the walk as the same absence.
+On a site where a quarter of the pages time out, the crawl returns three quarters of the
+surface and says nothing about the rest; the active tier then generates injection points from
+what survived, finds nothing wrong with it, and the report describes a clean scan of a site it
+mostly did not read. `_get` now returns `(response, None)` or `(None, reason)`, and the walk
+records a `fetch-failed` problem carrying the exception's class name — `ConnectTimeout` and
+`ConnectError` want different remedies, and several httpx exceptions stringify to the empty
+string, which as a bare `str(exc)` would have reached the report as a blank reason.
+
+**`urljoin` was called unguarded on an attribute the target controls.** `href="http://["`
+raises `ValueError: Invalid IPv6 URL`; so does a bracket anywhere in the host. The exception
+left `_extract_links`, left `crawl`, and was caught by `_safe_crawl` in the scanner, whose
+handler returned an empty `CrawlResult`. One malformed attribute on page forty therefore
+discarded the thirty-nine pages and every form already collected — the active tier got zero
+injection points, and the report was a fully-scanned site with nothing wrong with it. Link and
+form resolution are now guarded per element, so a bad `href` costs that `href`; `crawl` keeps
+its own backstop around the whole walk so an unexpected failure costs the pages *after* it and
+not the ones before, which is the property the previous structure had exactly inverted.
+
+**`max_pages` truncated in silence,** while `docs/configuration.md` had promised since it was
+written that reaching that bound "is logged, never a silent truncation". There was no logging
+in the crawler at all. The walk stopped and the result looked like a small site. It now records
+a `truncated` problem naming the bound and how many discovered links went unread — counted as
+distinct URLs rather than queue entries, because two pages linking to the same third page queue
+it twice and a number that overstates the gap is still the wrong number in a sentence whose
+only job is to size the gap. Reaching `max_depth` is deliberately *not* truncation: a
+depth-bounded walk that drained its queue read everything it meant to, and calling that
+incomplete would mark every run at default settings as a partial scan.
+
+**`checks._send` was the worst of the four, because every check below it reads a missing
+response as a negative.** No marker came back, no database error appeared, no redirect was
+issued — so a timeout, a reset, a refusal and a genuinely safe parameter produced the same
+silence and the same empty list, and the report said the parameter had been tested. The
+handler is deleted outright rather than replaced. `ScanContext.run_check` already wraps every
+(point, check) pair: the failure becomes a `ScanError`, the remaining checks continue, and the
+run exits 3 instead of 0 when that error is all there is. The fault isolation this handler
+existed to provide had been in place since [D13]; the handler was the one thing standing
+between the failure and it.
+
+**One exception really is not a failure, and it needed the other channel.** An
+`OutOfScopeError` from a probe means the host is in scope to *look at* but absent from
+`scope.active_allowlist` — a deliberate configuration, and recording it as an error would put
+every such run at exit 3. It is not nothing either: swallowed, it made a host the operator had
+specifically excluded from testing appear in the report as a host that had been actively
+tested and found sound. That is the most load-bearing form of [D42]'s conflation, because the
+reader's next action on a clean active report is to ship. It is now a `ScanSkip` with
+`check="gate"`, tallied per host and emitted once rather than once per refused check.
+
+**A 4xx is logged and no more, which is a judgement and not an oversight.** Dead links are
+ordinary on real sites; escalating each one would put exit 3 on nearly every run, and a code
+that fires on everything carries no information — the same reasoning that keeps skips out of
+the exit code in [D58]. Exceptions, 5xx, truncation, unparseable links, an out-of-scope entry
+URL and an unexpected crawl failure are the kinds that mean the surface is smaller than it
+looks, and those become errors.
+
+**The tests stayed green through all of it, which is the finding under the finding.** Not one
+crawler test exercised a failed fetch, a 5xx, a bound reached or a malformed attribute, so
+there was nothing for these defects to break. `test_crawl_skips_non_html_responses` was worse
+than absent: it asserted that a JSON page contributed no query parameters, and the URL it used
+had no query string, so it held with the content-type check deleted. It now serves a JSON body
+containing a link and a form and asserts neither is picked up. The rehearsal gate's phase D
+carries two errors where it carried one — the passive tier's failed GET was always recorded,
+the active tier's failed crawl was not — and phase A gained the assertion that closes the
+refusal case over a real socket: the `127.0.0.2` host that A18 and A19 already prove was
+crawled and never probed is now disclosed as refused rather than passed over. 44 assertions to
+45, and the suite from 466 to 481.
+
+**Why:** All four handlers were written for a defensible reason — one dead link must not sink a
+crawl, one broken probe must not abort a scan — and all four implemented it by returning the
+value that means *clean*. That is the cheapest mistake in this codebase to make and the most
+expensive to have made, because the failure direction is always the same one: a scanner that
+over-reports wastes an afternoon, and a scanner that under-reports is the reason nobody looked
+again. Resilience is a property of the *walk*, not of the *report*; continuing past a failure
+is correct and the silence about it never was. The rule this leaves behind is narrow enough to
+apply mechanically: an `except` clause that returns a falsy value is a claim about the target,
+and it has to be able to survive being read out loud as one.
 
 ---
 

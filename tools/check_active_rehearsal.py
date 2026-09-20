@@ -843,6 +843,17 @@ def phase_a(checks: Checks, url: str, config_path: Path,
         "no probe went to the in-scope, non-allowlisted host",
         *leaked,
     )
+    # A19b: and the report says so. A18 and A19 together describe a host that was
+    # crawled, turned into an injection point, and then never tested -- which for as
+    # long as this gate has existed the report rendered as a host that was tested and
+    # found clean, because `_send` swallowed the refusal and each check read the
+    # missing response as a negative (D59). The skip is per host, not per check.
+    gate_skips = [s for s in (scan.get("skipped") or []) if s.get("check") == "gate"]
+    checks.expect(
+        len(gate_skips) == 1 and "127.0.0.2" in (gate_skips[0].get("reason") or ""),
+        "and the report discloses that it was refused, not cleared",
+        f"skipped={scan.get('skipped')!r}",
+    )
     # A20: the token bucket is real.
     span = wire[-1]["t"] - wire[0]["t"]
     floor = pacing_floor(len(wire), PHASE_A_RPS)
@@ -1045,13 +1056,15 @@ def phase_d(checks: Checks, config_path: Path) -> None:
     checks.expect(code == 3, f"unreachable target exits 3 (got {code})",
                   f"errors={len(errors)}, findings={len(findings)}")
     # D2: the message text is platform/anyio wording and is deliberately not
-    # asserted; the scanner/check pair is ours.
+    # asserted; the scanner/check pairs are ours. Both tiers must speak up. The
+    # passive tier's failed GET was always recorded; the active tier's crawl failure
+    # was not, and that silence is what made a host that never answered a single
+    # packet produce an actively-scanned, clean-looking report (D59).
     checks.expect(
-        len(errors) == 1
-        and errors[0].get("scanner") == "dast"
-        and errors[0].get("check") == "response",
-        "and records the errors",
-        repr(errors)[:300],
+        sorted((e.get("scanner"), e.get("check")) for e in errors)
+        == [("dast", "response"), ("dast-active", "crawl")],
+        "and both tiers record what they could not reach",
+        repr(errors)[:400],
     )
     # D3: 1 outranking 3 is only safe while this holds.
     checks.expect(not findings, "with no findings to mask them",
