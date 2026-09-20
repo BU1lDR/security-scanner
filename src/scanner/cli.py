@@ -181,6 +181,18 @@ def _build_target(kind: str, value: str, config: Config, active: bool) -> Target
     allowed = set(scope_cfg.get("allowed_hosts", []))
     active_allow = set(scope_cfg.get("active_allowlist", []))
     ack = bool(scope_cfg.get("authorized_ack", False))
+    # Spelled under `dast.crawler` because contract §14 froze it there, enforced by
+    # `Scope` because "in scope" is Scope's word: the request gate re-checks every
+    # URL against the scope, so a crawler-local flag would have discovered a
+    # subdomain link and then had every fetch of it refused. For its first fourteen
+    # months this setting was read by nobody at all (D60).
+    subdomains = bool(config.get("dast.crawler.allow_subdomains", False))
+
+    def _scope() -> Scope:
+        return Scope(
+            allowed_hosts=allowed, active_allowlist=active_allow,
+            authorized_ack=ack, allow_subdomains=subdomains,
+        )
 
     if kind == "url":
         host = urlparse(value).hostname
@@ -188,17 +200,13 @@ def _build_target(kind: str, value: str, config: Config, active: bool) -> Target
             allowed.add(host)
             if active:
                 # The explicitly-typed target host is the strongest signal of
-                # intent, so --active authorizes actives for it specifically.
+                # intent, so --active authorizes actives for it specifically. Only
+                # that host: with allow_subdomains on, its subdomains become in
+                # scope to read and stay out of the active allowlist.
                 active_allow.add(host)
-        scope = Scope(
-            allowed_hosts=allowed, active_allowlist=active_allow, authorized_ack=ack
-        )
-        return Target(url=value, scope=scope)
+        return Target(url=value, scope=_scope())
 
-    scope = Scope(
-        allowed_hosts=allowed, active_allowlist=active_allow, authorized_ack=ack
-    )
-    return Target(code_path=value, scope=scope)
+    return Target(code_path=value, scope=_scope())
 
 
 async def _run(engine, target: Target, *, active_enabled: bool, config: Config):

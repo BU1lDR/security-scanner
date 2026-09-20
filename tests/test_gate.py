@@ -67,6 +67,29 @@ def test_active_request_to_egress_host_is_refused_even_if_misconfigured_into_sco
         gate.authorize("https://api.osv.dev/v1/query", active=True)
 
 
+def test_allow_subdomains_authorizes_a_passive_request_to_a_subdomain():
+    """The reason this setting had to live in `Scope` and not in the crawler: the
+    gate asks the scope on every request, so a crawler-local flag would have queued
+    a subdomain link and then had every fetch of it refused here (D60)."""
+    gate = _gate(allowed_hosts={"example.com"}, allow_subdomains=True)
+    assert gate.authorize("https://sub.example.com/page") is RequestClass.TARGET
+
+
+def test_allow_subdomains_does_not_authorize_an_active_request_to_a_subdomain():
+    """The gate is the last place this can be stopped, so it is asserted here too
+    and not only on `Scope`. A subdomain is in scope to read and still absent from
+    the active allowlist, which is what keeps probes off a host nobody named."""
+    gate = _gate(
+        allowed_hosts={"example.com"},
+        active_allowlist={"example.com"},
+        authorized_ack=True,
+        allow_subdomains=True,
+    )
+    assert gate.authorize("https://sub.example.com/page") is RequestClass.TARGET
+    with pytest.raises(OutOfScopeError):
+        gate.authorize("https://sub.example.com/page", active=True)
+
+
 def test_non_http_scheme_is_refused():
     # The choke point only authorizes http/https, even to an in-scope or egress host.
     gate = _gate(allowed_hosts={"example.com"})

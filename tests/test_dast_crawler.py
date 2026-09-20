@@ -26,16 +26,16 @@ class _FakeHttp:
         return _Resp("", status_code=404)
 
 
-def _scope(*hosts):
-    return Scope(allowed_hosts=set(hosts))
+def _scope(*hosts, subdomains=False):
+    return Scope(allowed_hosts=set(hosts), allow_subdomains=subdomains)
 
 
-def _crawl(entry, pages, *, max_depth=2, max_pages=50, allow_subdomains=False,
+def _crawl(entry, pages, *, max_depth=2, max_pages=50, subdomains=False,
            hosts=("example.com",)):
     http = _FakeHttp(pages)
     result = asyncio.run(
-        crawl(entry, http, _scope(*hosts), max_depth=max_depth,
-              max_pages=max_pages, allow_subdomains=allow_subdomains)
+        crawl(entry, http, _scope(*hosts, subdomains=subdomains),
+              max_depth=max_depth, max_pages=max_pages)
     )
     return result, http
 
@@ -85,6 +85,33 @@ def test_crawl_stays_in_scope():
     result, http = _crawl("https://example.com/", pages)
     assert all("evil.com" not in u for u in http.gets)
     assert "https://example.com/ok" in {p.url for p in result.pages}
+
+
+def test_crawl_does_not_leave_the_host_by_default():
+    pages = {
+        "https://example.com/": _Resp('<a href="https://sub.example.com/x">s</a>'),
+        "https://sub.example.com/x": _Resp("subdomain page"),
+    }
+    result, http = _crawl("https://example.com/", pages)
+    assert "https://sub.example.com/x" not in http.gets
+    assert [p.url for p in result.pages] == ["https://example.com/"]
+
+
+def test_allow_subdomains_lets_the_crawl_follow_a_subdomain_link():
+    """`crawl` had an `allow_subdomains` parameter from the day it was written and
+    read it nowhere; the setting reaches it through the scope now, which is also the
+    object the request gate asks (D60)."""
+    pages = {
+        "https://example.com/": _Resp('<a href="https://sub.example.com/x">s</a>'),
+        "https://sub.example.com/x": _Resp('<form action="/login"><input name="u">'
+                                           "</form>"),
+    }
+    result, http = _crawl("https://example.com/", pages, subdomains=True)
+    assert "https://sub.example.com/x" in http.gets
+    assert "https://sub.example.com/x" in {p.url for p in result.pages}
+    # And the surface found there is usable: an out-of-scope form action is dropped,
+    # so a form on a subdomain only survives if the subdomain is genuinely in scope.
+    assert [f.url for f in result.forms] == ["https://sub.example.com/login"]
 
 
 def test_crawl_captures_query_parameters():

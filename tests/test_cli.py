@@ -226,3 +226,57 @@ def test_active_without_ack_warns(tmp_path, capsys):
     assert code == 0
     err = capsys.readouterr().err
     assert "authoriz" in err.lower() and "ack" in err.lower()
+
+
+# --- the config reaching the scope (D60) ---
+
+class _ScopeRecorder(Engine):
+    """Runs nothing; keeps the scope the CLI built."""
+
+    def __init__(self):
+        super().__init__(registry=Registry())
+        self.scope = None
+
+    async def run(self, target, **kwargs):
+        self.scope = target.scope
+        return await super().run(target, **kwargs)
+
+
+def _config(tmp_path, body: str):
+    path = tmp_path / "secscan.toml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_allow_subdomains_reaches_the_scope_the_gate_asks(tmp_path):
+    """The setting is spelled under `dast.crawler` (contract §14 froze it there) and
+    enforced by `Scope`, because the request gate consults the scope on every
+    request. Asserted through the CLI because the wiring between those two is the
+    part that did not exist: the key was in DEFAULTS and in the docs and was read by
+    nothing at all (D60)."""
+    cfg = _config(tmp_path, "[dast.crawler]\nallow_subdomains = true\n")
+    engine = _ScopeRecorder()
+    assert main(["https://example.com/", "--config", cfg], engine=engine) == 0
+    assert engine.scope.allow_subdomains is True
+    assert engine.scope.allows("https://sub.example.com/")
+
+
+def test_the_default_keeps_subdomains_out_of_scope(tmp_path):
+    engine = _ScopeRecorder()
+    assert main(["https://example.com/"], engine=engine) == 0
+    assert engine.scope.allow_subdomains is False
+    assert not engine.scope.allows("https://sub.example.com/")
+
+
+def test_allow_subdomains_does_not_extend_the_active_authorization(tmp_path):
+    """`--active` authorizes the host the operator typed. With subdomains in scope it
+    must keep authorizing exactly that host: a run of `--active https://example.com/`
+    is not consent to probe `admin.example.com`."""
+    cfg = _config(
+        tmp_path,
+        "[scope]\nauthorized_ack = true\n\n[dast.crawler]\nallow_subdomains = true\n",
+    )
+    engine = _ScopeRecorder()
+    main(["https://example.com/", "--active", "--config", cfg], engine=engine)
+    assert engine.scope.active_allowed("https://example.com/")
+    assert not engine.scope.active_allowed("https://admin.example.com/")

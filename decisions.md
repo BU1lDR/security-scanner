@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 481 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 496 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1233,6 +1233,65 @@ again. Resilience is a property of the *walk*, not of the *report*; continuing p
 is correct and the silence about it never was. The rule this leaves behind is narrow enough to
 apply mechanically: an `except` clause that returns a falsy value is a claim about the target,
 and it has to be able to survive being read out loud as one.
+
+---
+
+### D60 — `allow_subdomains` was a documented setting that nothing read
+`dast.crawler.allow_subdomains` has been in `DEFAULTS`, in the sample config file, in
+`docs/configuration.md`'s key table with a written description, in contract §14's frozen
+namespace, and in `crawl()`'s own signature since the crawler was written. It was read by
+nothing. The parameter arrived, was bound to a local name, and went out of scope — so a
+config file that said `allow_subdomains = true` produced a scan identical to one that said
+`false`, and the documented sentence "whether `sub.example.com` is in scope for a scan of
+`example.com`" described behaviour the tool did not have.
+
+**Implementing it inside the crawler would have been a second no-op.** That was the obvious
+reading of where it belonged — it is spelled under `dast.crawler`, and the crawler is what
+follows links — and it does not work: `RequestGate.authorize` asks `scope.allows(url)` on every
+outbound request, so a crawl that widened its own private notion of scope would queue the
+subdomain link, hand it to the choke point, and get an `OutOfScopeError` for each one. The
+setting has to be carried by the object the gate consults. Where a key is *spelled* and what
+*enforces* it are separate questions, and the contract's precedence note only ever answered the
+first; it now says so.
+
+**So `Scope` grew the flag, and `allows()` grew a suffix test — with the leading dot, which is
+the entire guarantee.** `host.endswith("example.com")` is true of `notexample.com`, and
+lookalike domains are registered precisely because that test gets written without the dot.
+`host.endswith(".example.com")` is true only of things under it. `https://example.com.evil.net/`
+fails both, which is the other half of the same class of mistake.
+
+**`active_allowlist` is not widened, and that asymmetry is the decision in this entry.** What
+you may read and what you may send attack-shaped traffic to are different questions, and only
+the second is irreversible from the target's side: widening the first finds more pages, while
+widening the second would aim injection probes at a host nobody typed. `--active
+https://example.com/` is consent to probe `example.com`. It is not consent to probe
+`admin.example.com`, which is very often a different application with a different owner and a
+different tolerance for being fuzzed. An explicitly listed `admin.example.com` still works,
+because that host *was* named — the rule refuses hosts nobody chose, not hosts somebody chose.
+Asserted three times over, at `Scope`, at the gate, and through the CLI, and each of the three
+goes red on its own when the exact match is relaxed.
+
+**One thing found on the way in.** Both sides of every comparison in this class are host
+strings, and only one side was normalized. `urlparse` lowercases the host it parses;
+`allowed_hosts` is whatever a person typed into a file. `allowed_hosts = ["Example.com"]`
+therefore matched nothing at all, including the target it was written to name, and because this
+class is default-deny the result was a scan that refused every one of its own requests over a
+capital letter. Since [D59] that at least announces itself instead of reporting a clean site,
+which is the point of that entry — but the fix is to fold both sides. The root-zone trailing
+dot goes with it: `https://example.com./` is the fully-qualified spelling of the same host and
+resolves identically, so it must not be a way to reach a host that was not allowed, nor to slip
+past the suffix test above.
+
+**Why:** A setting that is documented and unread is worse than a missing feature, because the
+operator has already decided the question and written the answer down. Every layer said the
+same true-sounding thing — the default existed, the key table described it, the function took
+the argument — and the one line that would have made any of it real was never written. That is
+the shape [D42] and [D46] keep finding: not a wrong answer, an instruction that was never
+carried out and never reported. It is the reason `unknown_keys` rejects a misspelt key rather
+than warning about it, and the reason that check could not catch this one: the key was spelled
+correctly. Nothing in this repo checks that a key spelled correctly is *used*, and the only
+defence is a test that asserts the behaviour rather than the plumbing — which is what the
+fifteen new ones do, at the three layers that enforce this and not at the one that names it.
 
 ---
 

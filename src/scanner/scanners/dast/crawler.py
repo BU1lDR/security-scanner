@@ -297,8 +297,15 @@ async def crawl(
     *,
     max_depth: int = 2,
     max_pages: int = 50,
-    allow_subdomains: bool = False,
 ) -> CrawlResult:
+    """Walk the site from ``entry_url``, bounded and inside ``scope``.
+
+    There is no ``allow_subdomains`` parameter. There was one for as long as this
+    function existed, and it was read by nothing: a crawler that widened its own
+    notion of scope would queue a subdomain link and then watch the request gate
+    refuse every fetch of it, because the gate asks the scope, not the crawler.
+    ``Scope.allow_subdomains`` is where that setting lives now (D60).
+    """
     result = CrawlResult()
     try:
         await _walk(

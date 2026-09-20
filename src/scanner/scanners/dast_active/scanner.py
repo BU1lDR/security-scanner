@@ -140,7 +140,8 @@ class DastActiveScanner(Scanner):
                 ctx.scope,
                 max_depth=int(c.get("max_depth", 2)),
                 max_pages=int(c.get("max_pages", 50)),
-                allow_subdomains=bool(c.get("allow_subdomains", False)),
+                # allow_subdomains is deliberately absent: it is carried by
+                # ctx.scope, which the crawl and the request gate both consult.
             )
         except Exception as exc:  # noqa: BLE001 - a failed crawl must not sink the scan
             ctx.emit_error("dast-active", "crawl", exc)

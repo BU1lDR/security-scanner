@@ -97,6 +97,14 @@ no-op lived; this is a real remaining gap, not a solved problem.
 | `scope.active_allowlist` | `[]` | Hosts the *intrusive* checks may target. Narrower than `allowed_hosts` on purpose: being allowed to look at a host is not being allowed to attack it. |
 | `scope.authorized_ack` | `false` | Your assertion that you are authorized to actively test the target. Equivalent to typing `--i-am-authorized`. |
 
+Host matching is exact, and case- and trailing-dot-insensitive on both sides —
+`Example.COM` in a file matches `https://example.com/`, and `https://example.com./`
+does not sneak past a host that was not listed. A subdomain is a different host
+unless [`dast.crawler.allow_subdomains`](#dast--the-live-site-checks) is on, and
+that setting widens `allowed_hosts` only: `active_allowlist` is always matched
+literally, so turning it on for a scan of `example.com` never points a probe at
+`admin.example.com`. To test a subdomain actively, name it.
+
 ### Read this before putting `authorized_ack` in a file
 
 `authorized_ack = true` in a config file is the same statement as
@@ -183,7 +191,7 @@ you have a specific need for it to be ambient.
 | `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups). |
 | `dast.crawler.max_depth` | `2` | Link depth from the entry URL. |
 | `dast.crawler.max_pages` | `50` | Hard page ceiling. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
-| `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. |
+| `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. Widens `scope.allowed_hosts` only — never `scope.active_allowlist`, so no probe reaches a host you did not name. Lookalikes are not subdomains: `notexample.com` stays out. |
 | `dast.crawler.user_agent` | unset | Overrides `http.user_agent` for crawl traffic only. Leave unset to use one identity throughout. |
 
 ### `dast.active` — the intrusive tier

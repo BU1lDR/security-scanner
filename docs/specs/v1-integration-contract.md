@@ -475,7 +475,10 @@ ai.enabled                 ai.provider                 ai.model
 Precedence for things that used to be duplicated:
 
 - Crawl depth / pages / subdomains / user-agent live under `dast.crawler.*` only.
-  There is no `scope.max_crawl_depth`.
+  There is no `scope.max_crawl_depth`. Where a setting is *spelled* and what enforces
+  it are separate questions: `allow_subdomains` is carried by `Scope`, because the
+  request gate consults the scope on every request and a crawler-local flag could
+  only discover links the gate would then refuse (D60).
 - Identity (`http.user_agent`) is the default UA; `dast.crawler.user_agent`
   overrides it for crawl traffic only if set.
 - Active scope uses `scope.active_allowlist` (the old `scope.allow` name is gone).
