@@ -336,6 +336,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, index_page().encode(), extra={
                 "Set-Cookie": f"{COOKIE_NAME}=1; SameSite=Lax; Path=/",
             })
+        if path == "/enter":
+            # Phases A, B and C are aimed here, not at "/". Every route on this
+            # site sits behind this one 302, so the redirect follow added in D62
+            # is load-bearing for the whole of phase A rather than for one extra
+            # assertion: without it the crawl reads this stub, finds no links in
+            # an empty body, discovers no injection point, and A5's positive
+            # control goes to zero. That is D57's rule -- what a gate needs is a
+            # route, not another assertion -- and it is also what the real web
+            # looks like, which is the thing this file exists to rehearse.
+            return self._send(302, b"", extra={"Location": "/"})
         if path == "/forms":
             return self._send(200, FORMS_PAGE.encode())
         if path == "/home":
@@ -723,6 +733,21 @@ def phase_a(checks: Checks, url: str, config_path: Path,
         scan.get("sent_active_traffic") is True,
         "the report discloses active traffic",
         f"sent_active_traffic was {scan.get('sent_active_traffic')!r}",
+    )
+    # A4b: the entry URL is a 302 and everything else on this site is behind it,
+    # so this is the cause A5 would otherwise report as a symptom. Both tiers
+    # follow it, so "/" is fetched twice and the stub is never graded: the
+    # header findings below are located on the page, not on the redirect.
+    entry_path = urlsplit(url).path
+    landed = [r for r in wire if urlsplit(r["path"]).path == "/"]
+    graded_stub = [f for f in findings
+                   if (f.get("location") or {}).get("url", "").endswith(entry_path)]
+    checks.expect(
+        len(landed) == 2 and not graded_stub,
+        f"the {entry_path} redirect was followed by both tiers",
+        f"GETs of '/': {len(landed)} (expected 2: one per tier)",
+        *[f"finding graded on the redirect stub: {f.get('rule_id')}"
+          for f in graded_stub],
     )
     # A5: the positive control proper. Payloads left the process and arrived.
     probes = [r for r in wire if XSS_MARKER in decoded(r)]
@@ -1245,7 +1270,10 @@ def main() -> int:
         main_config.write_text(MAIN_CONFIG, encoding="utf-8")
         capped_config = Path(tmp) / "capped.toml"
         capped_config.write_text(CAPPED_CONFIG, encoding="utf-8")
-        url = f"http://127.0.0.1:{port1}/"
+        # /enter 302s to /. Aiming the rehearsal at a redirect rather than at the
+        # index costs one request and makes the whole of phases A-C depend on the
+        # hop being followed, which is how the real web is shaped (D62).
+        url = f"http://127.0.0.1:{port1}/enter"
 
         print(f"  -- A: authorized, against {hosts[0]} "
               f"(+ {hosts[1]} in scope, not allowlisted) --")

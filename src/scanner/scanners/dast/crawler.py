@@ -6,6 +6,13 @@ Every fetch is a plain ``GET`` (``active=False``) through the shared client, so 
 is passive reconnaissance against the already-authorized target — the choke point
 still rate-limits and scope-checks each request.
 
+It follows redirects, one hop at a time through its own queue rather than by asking
+the client to do it, because the client must not: the open-redirect check reads the
+``Location`` header that following would consume. Every hop is scope-checked and
+costs a page against ``max_pages``, so the bound still means what it says —
+:mod:`scanner.scanners.dast.redirects` holds the policy and explains what it cost to
+not have it.
+
 Its job is *discovery*, not judgement: it produces :class:`Page` records (a URL and
 its query parameters) and :class:`Form` records (action, method, and every named
 field, hidden/CSRF included). The active tier turns those into injection points;
@@ -27,8 +34,11 @@ from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
+from scanner.scanners.dast.redirects import (
+    HTTP_SCHEMES, MAX_HOPS, REDIRECT_KINDS, next_hop,
+)
+
 _PARSER = "html.parser"  # stdlib parser: always available, lenient enough here.
-_HTTP_SCHEMES = frozenset({"http", "https"})
 
 
 @dataclass(frozen=True)
@@ -72,8 +82,12 @@ class CrawlProblem:
 #: the caller should therefore record as errors. ``unreadable`` (a 4xx on a link)
 #: is deliberately not here: escalating every dead link would put exit 3 on most
 #: real sites, and a code that fires on everything carries no information.
+#:
+#: The redirect kinds are all in, and each of them hides more than one page: what
+#: stopped is not a link but a doorway, and everything behind it is unread (D62).
 INCOMPLETE_KINDS = frozenset({"fetch-failed", "server-error", "truncated",
-                              "bad-link", "out-of-scope", "crawl-failed"})
+                              "bad-link", "out-of-scope", "crawl-failed"}
+                             ) | REDIRECT_KINDS
 
 
 @dataclass
@@ -155,7 +169,7 @@ def _extract_links(
         except ValueError as exc:
             bad.append((str(href)[:120], _why(exc)))
             continue
-        if scheme in _HTTP_SCHEMES:
+        if scheme in HTTP_SCHEMES:
             links.append(target)
     return links, bad
 
@@ -207,13 +221,19 @@ async def _walk(
 
     Takes the result rather than building one, so that whatever has been collected
     survives an exception on the way out. :func:`crawl` is the only caller.
+
+    Queue entries carry a hop count alongside the depth because a redirect is not a
+    link. It advances the walk without the operator having asked for another level,
+    so it is queued at the *same* depth — otherwise a site that redirects its own
+    root spends one of ``max_depth``'s two levels arriving at its front page — and
+    the hop count, not the depth, is what stops a chain that never lands.
     """
     visited: set[str] = set()
-    queue: deque[tuple[str, int]] = deque([(entry_url, 0)])
+    queue: deque[tuple[str, int, int]] = deque([(entry_url, 0, 0)])
     fetched = 0
 
     while queue and fetched < max_pages:
-        url, depth = queue.popleft()
+        url, depth, hops = queue.popleft()
         norm = _normalize(url)
         if norm in visited:
             continue
@@ -246,6 +266,35 @@ async def _walk(
             continue
 
         result.pages.append(Page(url=url, params=_query_params(url)))
+
+        target, kind, detail = next_hop(resp, url, scope)
+        if kind or target is not None:
+            # A 3xx used to fall through to here and be filed as an ordinary page.
+            # Its body is empty, so no links were found in it, and the walk stopped:
+            # a site whose root redirects — the commonest shape there is — was
+            # crawled to exactly one page, reported no problems, and handed the
+            # active tier nothing to test (D62).
+            #
+            # The Page record above stays. The redirect is still a page we fetched
+            # with a query string of its own, and it is the only thing the
+            # open-redirect check can be pointed at: `/go?next=...` is where that
+            # bug lives, and dropping the record would close the hole in the crawler
+            # by removing the check's only injection point.
+            if kind:
+                result.problems.append(CrawlProblem(url, kind, detail))
+            elif hops >= MAX_HOPS:
+                result.problems.append(CrawlProblem(
+                    url, "redirect-capped",
+                    f"stopped after {MAX_HOPS} redirects; {target} was not read",
+                ))
+            else:
+                queue.append((target, depth, hops + 1))
+            # No link extraction either way: whatever a server puts in a redirect
+            # body is not the page, and the page itself is in the queue now. A
+            # chain that comes back to somewhere already visited ends at the top of
+            # this loop, which is where every other repeat link ends.
+            continue
+
         if not _is_html(resp):
             continue
 
@@ -271,7 +320,7 @@ async def _walk(
                     ))
                     continue
                 if queueable:
-                    queue.append((link, depth + 1))
+                    queue.append((link, depth + 1, 0))
 
     if queue:
         # The bound did its job; saying so is the other half of it. docs/
@@ -282,7 +331,7 @@ async def _walk(
         # Counted as distinct URLs rather than as queue entries: the same link can be
         # queued from two pages, and a number that overstates the gap is still a
         # wrong number in a sentence whose whole job is to size the gap.
-        unread = {_normalize(url) for url, _ in queue} - visited
+        unread = {_normalize(url) for url, _, _ in queue} - visited
         result.problems.append(CrawlProblem(
             entry_url, "truncated",
             f"stopped after {fetched} pages at max_pages={max_pages}; "

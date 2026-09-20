@@ -6,8 +6,8 @@
 >
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
-**Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 504 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Last updated:** 2026-09-21
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 523 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1366,6 +1366,113 @@ work is a count of work that needed a request. The two test defects are that fai
 the suite rather than in the source — an assertion that still holds when the feature is
 absent is not watching the feature — and they are why both source defects shipped in a
 tier whose tests all passed.
+
+---
+
+### D62 — A 302 is a door, and this scanner had been grading the door
+
+**The shape of it.** `AsyncHttpClient` sets `follow_redirects=False`, and that is right:
+`check_open_redirect` reads the `Location` header, and a client that follows it has
+already destroyed the evidence. What was missing is the other half. Every consumer of a
+response then had to decide for itself what a 3xx meant, and none of them did. The
+crawler's `_walk` tested `status >= 500`, then `status >= 400`, and a 302 fell past both
+into `result.pages.append(Page(...))` — filed as an ordinary page. Its body is empty, so
+`_extract_links` found nothing in it, so the queue emptied and the walk ended.
+
+**Measured, not reasoned about.** A local site whose `/` returns 302 to `/home`, with a
+reflected-XSS parameter, a POST form and an open-redirect route linked from `/home`.
+The server's own log shows it received exactly one request. `/home`, `/search`, `/go`
+and `/comment` were never asked for. `errors` was empty, `problems` was empty, the
+active tier reported having run and sent zero requests, and exit 1 came entirely from
+five header and fingerprint findings graded on the redirect stub. After the fix the same
+site yields a HIGH reflected XSS and a MEDIUM open redirect, and the server sees
+twenty requests. Two invisible vulnerabilities and a report that named neither, on a
+site whose only unusual property is that its front door is a redirect — which is the
+commonest shape on the web.
+
+**Both directions wrong at once, which is the part worth keeping.** The five findings
+were not merely mislocated, they were false: a 302 has no Content-Security-Policy
+because it has no document to protect, and no X-Frame-Options because it has nothing
+framable. So the tier invented five problems about a response that was never the page
+while never reading the response that would have answered the question. A scanner can
+be too loud and blind simultaneously, and the same mistake caused both.
+
+**The TLS check was the worst of it.** It skipped on `not url.startswith("https://")`,
+saying "the target is plain HTTP, so there is no certificate to read". But
+`http://example.com` redirecting to `https://example.com` *is* what a correctly
+configured site looks like, so the single commonest invocation of this tool against a
+site that had done TLS right inspected no certificate at all and reported that there was
+none. An expired certificate one hop away was a sentence about there being nothing to
+check. The probe now takes whichever end of the chain was reached over TLS, preferring
+the landing; an HTTPS entry that lands on plaintext keeps the entry URL, because that
+handshake happened and its certificate is real.
+
+**The exposed-file probe had the same fault at a different address.**
+`probe_exposed_files` derives an origin and appends paths to it, and after a redirect to
+`www.example.com` it was still appending them to `example.com`. Every probe came back
+3xx, a 3xx is not a hit, and the check reported nothing exposed about a host it had not
+examined. Contract §12 said "same-origin only (never a new host)"; it now says one
+origin, and that origin is the one the entry URL landed on, which the scope gate still
+has to permit before any of it leaves the machine.
+
+**Where the policy lives.** A new `scanners/dast/redirects.py`, because two tiers needed
+the same three answers: is there somewhere to go, are we allowed to go there, and have
+we been going too long. `FOLLOWABLE` is `{301, 302, 303, 307, 308}` and not
+`range(300, 400)` — 300 offers a list rather than a destination and 304 means the client
+already has the body, so following either would turn a cache revalidation into a reported
+coverage gap. The header reader falls back from `get` to `get_list`, because the response
+doubles in this repo variously have one or the other and an `AttributeError` raised inside
+a redirect check would be recorded by `run_check` as a fault in the fault reporter.
+
+**A redirect is queued at the same depth.** It is not a link somebody clicked. At
+`depth + 1`, a site that bounces its own root spends one of `max_depth`'s two levels
+arriving at its own front page, and an operator who asked for two levels silently gets
+one. That leaves depth unable to stop a chain, so the hop count is separate and the two
+bounds are complementary: `max_depth` is about how far into a site to walk, the hop cap
+is about a chain that never lands.
+
+**Five hops, hardcoded, and no config key for it.** `max_depth` and `max_pages` are
+policy about how much of somebody else's site to read; a hop cap is a loop guard. Every
+hop is a request and is charged against `max_pages`, so the bound an operator actually
+cares about is already exposed and already theirs to set. Adding a key would put surface
+into contract §14's frozen namespace for a number nobody needs to turn, and §14 now says
+so explicitly so the absence reads as a decision rather than an oversight.
+
+**Every decline is disclosed.** Four kinds, separate because the operator's next action
+differs for each: `redirect-broken` (a 3xx with no `Location`, or one this scanner cannot
+fetch), `redirect-out-of-scope`, `redirect-capped`, `redirect-loop`. All four are in
+`INCOMPLETE_KINDS`, which is what moves the exit code to 3. The out-of-scope message
+names the host and what to add to `scope.allowed_hosts`, because not following it is
+correct — the gate would refuse the request anyway — and *not saying so* is the
+failure: everything behind that hop is unread, and an unread subtree and an empty site
+are the same report otherwise (D42). The passive tier files them through
+`emit_failure`, which is the channel for a failure reported rather than raised.
+
+**The Page record for the 3xx stays.** `/go?next=/home` is where an open redirect lives,
+and `injection_points` builds that check's point from a fetched page's own query string.
+Dropping the record would have closed the crawler's hole by deleting the open-redirect
+check's only reachable target — a fix that trades one blindness for another and looks
+tidier while doing it. There is a test pinning it for exactly that reason.
+
+**The rehearsal needed a route, not an assertion.** Phases A, B and C are now aimed at
+`/enter`, which 302s to `/`, and every route on that site sits behind it. So the follow
+is load-bearing for the whole of phase A rather than for one extra check: with the fix
+removed, the crawl reads the stub, discovers no injection point, and A5's positive
+control goes to zero — fourteen assertions fail at once, which is what the defect did to
+real sites. One pointed assertion (A4b) names the cause so the cascade has a heading: `/`
+must be fetched twice, once per tier, and no finding may be located on the stub. That is
+D57's rule applied a third time. Aiming the rehearsal at a redirect cost one request and
+changed no expected value, because the landing is the page the old assertions were
+already written against.
+
+**Why:** A redirect is not a page with nothing on it, and nothing in this tool had ever
+said which of those it was looking at. Every defect here is the same substitution — the
+response that answered first standing in for the response a client would read — and it
+produced, from one mistake, five false findings, three whole classes of missed
+vulnerability, a TLS check that skipped the case it exists for, and a file probe aimed at
+a host it never examined. The fix is not "follow redirects": it is that a hop we decline
+to follow has to be as loud as a page we failed to fetch, because what is behind it is
+not one page but everything.
 
 ---
 

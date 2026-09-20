@@ -187,12 +187,23 @@ you have a specific need for it to be ambient.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `dast.enabled` | `true` | |
-| `dast.tls.enabled` | `true` | Certificate and protocol checks. |
-| `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups). |
-| `dast.crawler.max_depth` | `2` | Link depth from the entry URL. |
-| `dast.crawler.max_pages` | `50` | Hard page ceiling. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
+| `dast.tls.enabled` | `true` | Certificate and protocol checks, against the origin the entry URL *landed* on. An `http://` target that redirects to HTTPS is checked, which is the ordinary shape of a site that has configured TLS correctly; it used to be reported as having no certificate to read. |
+| `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups), at the origin the entry URL landed on. Still one origin, still only a host `scope.allowed_hosts` permits. |
+| `dast.crawler.max_depth` | `2` | Link depth from the entry URL. Redirects do not spend a level: a site that bounces its own root would otherwise arrive at its front page having used one of your two. |
+| `dast.crawler.max_pages` | `50` | Hard page ceiling. Every request counts, redirect hops included — a hop is traffic to someone else's machine, which is what this bounds. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
 | `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. Widens `scope.allowed_hosts` only — never `scope.active_allowlist`, so no probe reaches a host you did not name. Lookalikes are not subdomains: `notexample.com` stays out. |
 | `dast.crawler.user_agent` | unset | Overrides `http.user_agent` for crawl traffic only. Leave unset to use one identity throughout. |
+
+**Redirects are followed, and there is no setting for it.** The crawl and the
+passive checks both follow up to five hops, scope-checked like any other request,
+because the alternative is what this tool used to do: a site whose `/` returns a
+302 — the commonest shape on the web — was scanned to exactly one empty stub, the
+security headers were graded on that stub, and the report named no problem. There
+is deliberately no max-redirects key. A hop is a request and is charged against
+`max_pages`, so the bound on how much traffic you send is already yours to set; the
+five is a loop guard. A hop that is broken, out of scope or looping is reported as
+an error naming the host and what to add to `scope.allowed_hosts`, because
+everything behind that hop went unread.
 
 ### `dast.active` — the intrusive tier
 

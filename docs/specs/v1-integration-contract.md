@@ -416,13 +416,29 @@ This lets the engine's `active` gate work on a whole scanner, keeps passive
 always-on, and keeps the `--only dast` surface intuitive (passive) with
 `--only dast-active` for the intrusive tier.
 
+**Redirects:** the HTTP client does not follow them (`follow_redirects=False`) and
+must not — the open-redirect check reads the `Location` header that following would
+consume. Both DAST tiers therefore follow them explicitly, through
+`scanners/dast/redirects.py`: the crawler queues each hop at the *same* depth (a
+redirect is not a link somebody clicked) and charges it against `max_pages`, and
+the passive tier grades headers and fingerprints on the response a client lands on
+while reading cookies from every hop. Five hops maximum, deliberately not
+configurable — see §14 on why that is not a new key. A hop that is broken, out of
+scope, looping or over the cap is a recorded coverage gap, because everything
+behind it is unread.
+
 **Exposed-file probing** (`dast.exposed.*`): lives in the *passive* scanner and
 is default-on, but is honestly more than pure observation — it sends GET requests
-the crawl didn't. It is bounded by these rules: same-origin only (never a new
-host), GET-only, non-destructive, small curated path list, soft-404 calibrated,
-and every probe is logged. It is reconnaissance against the *already-authorized*
-target, so it stays passive-tier; it is not attack-style input. Config flag
-`dast.exposed.enabled` can turn it off.
+the crawl didn't. It is bounded by these rules: one origin only, and that origin
+is the one the entry URL *landed* on rather than the one that was typed; GET-only,
+non-destructive, small curated path list, soft-404 calibrated, and every probe is
+logged. The landing origin is the correction, not a loosening: a scan of
+`example.com` that redirects to `www.example.com` used to probe the typed host,
+collect a 3xx for every path, and report nothing exposed about a host it never
+examined. It can only ever be a host the scope already allows — the request gate
+is unchanged and still refuses the rest. It is reconnaissance against the
+*already-authorized* target, so it stays passive-tier; it is not attack-style
+input. Config flag `dast.exposed.enabled` can turn it off.
 
 **Crawler → active bridge:** the passive crawler produces `Page`/`Form` records.
 The active tier needs `InjectionPoint`s. The transform (one InjectionPoint per
@@ -481,6 +497,12 @@ Precedence for things that used to be duplicated:
   only discover links the gate would then refuse (D60).
 - Identity (`http.user_agent`) is the default UA; `dast.crawler.user_agent`
   overrides it for crawl traffic only if set.
+- There is no `dast.crawler.max_redirects`. The hop cap is five, in code. This
+  namespace is frozen, and the two bounds that are *about* how much of somebody
+  else's site to read are already exposed: every redirect hop is a request and is
+  charged against `max_pages`, so an operator who wants less traffic already has the
+  knob. A hop cap is a loop guard, and a loop guard nobody needs to turn is surface
+  without a purpose.
 - Active scope uses `scope.active_allowlist` (the old `scope.allow` name is gone).
 
 ---

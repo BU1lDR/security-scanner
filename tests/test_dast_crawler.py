@@ -2,6 +2,7 @@ import asyncio
 
 from scanner.core.scope import Scope
 from scanner.scanners.dast.crawler import Form, Page, crawl
+from scanner.scanners.dast.redirects import MAX_HOPS
 
 
 class _Resp:
@@ -364,3 +365,135 @@ def test_an_unexpected_failure_keeps_what_was_already_collected():
     assert len(failed) == 1
     assert "RuntimeError: scope went bang" == failed[0].detail
     assert failed[0] in result.incomplete()
+
+
+# ---------------------------------------------------------------------------
+# Redirects (D62). The crawler used to file a 3xx as an ordinary page, find no
+# links in its empty body and stop. Measured against a local site whose "/"
+# returns 302 to "/home": the server received exactly one request, `problems`
+# was empty, and the active tier got zero injection points out of it -- the
+# commonest shape on the web, reported as a completed scan.
+
+
+def _redirect(location, status=302, content_type="text/html"):
+    resp = _Resp("", status_code=status, content_type=content_type)
+    resp.headers["location"] = location
+    return resp
+
+
+def test_a_redirect_is_followed_to_the_page_behind_it():
+    pages = {
+        "https://example.com/": _redirect("/home"),
+        "https://example.com/home": _Resp('<a href="/deep">d</a>'),
+        "https://example.com/deep": _Resp("leaf"),
+    }
+    result, http = _crawl("https://example.com/", pages)
+    assert "https://example.com/home" in http.gets
+    assert "https://example.com/deep" in {p.url for p in result.pages}
+    assert result.problems == []
+
+
+def test_a_redirect_does_not_spend_a_level_of_max_depth():
+    """A redirect is not a link somebody clicked. Queued at depth+1 instead, a
+    site that bounces its own root would spend one of max_depth's two levels
+    arriving at its own front page, and the operator who asked for two levels
+    would silently get one."""
+    pages = {
+        "https://example.com/": _redirect("/home"),
+        "https://example.com/home": _Resp('<a href="/one">1</a>'),
+        "https://example.com/one": _Resp("leaf"),
+    }
+    result, http = _crawl("https://example.com/", pages, max_depth=1)
+    assert "https://example.com/one" in http.gets
+
+
+def test_the_redirect_itself_stays_in_the_pages():
+    """`/go?next=...` is where an open redirect lives, and a Page record of the
+    3xx with its query string is the only thing `injection_points` can build that
+    check's point from. Dropping the record would have closed the crawler's hole
+    by deleting the check's only reachable target."""
+    pages = {
+        "https://example.com/go?next=/home": _redirect("/home"),
+        "https://example.com/home": _Resp("landed"),
+    }
+    result, _ = _crawl("https://example.com/go?next=/home", pages)
+    go = [p for p in result.pages if p.url.endswith("next=/home")]
+    assert len(go) == 1
+    assert go[0].params == (("next", "/home"),)
+
+
+def test_a_redirect_with_no_location_is_a_coverage_gap():
+    pages = {"https://example.com/": _Resp("", status_code=302)}
+    result, _ = _crawl("https://example.com/", pages)
+    assert _kinds(result) == ["redirect-broken"]
+    assert result.incomplete()
+    assert "no Location" in result.problems[0].detail
+
+
+def test_a_redirect_out_of_scope_is_refused_and_said_so():
+    """Not following it is right -- the gate would refuse the request anyway. Not
+    *saying* so is the failure: everything behind that hop is unread, and the
+    remedy (name the host, or allow subdomains) is in the message because the
+    operator cannot otherwise tell this from a site with one page."""
+    pages = {
+        "https://example.com/": _redirect("https://cdn.elsewhere.com/home"),
+    }
+    result, http = _crawl("https://example.com/", pages)
+    assert http.gets == ["https://example.com/"]
+    assert _kinds(result) == ["redirect-out-of-scope"]
+    assert "cdn.elsewhere.com" in result.problems[0].detail
+    assert "allowed_hosts" in result.problems[0].detail
+    assert result.incomplete()
+
+
+def test_a_redirect_to_a_scheme_we_cannot_fetch_is_a_coverage_gap():
+    pages = {"https://example.com/": _redirect("mailto:nobody@example.com")}
+    result, http = _crawl("https://example.com/", pages)
+    assert http.gets == ["https://example.com/"]
+    assert _kinds(result) == ["redirect-broken"]
+    assert "mailto" in result.problems[0].detail
+
+
+def test_a_redirect_loop_terminates_without_a_wasted_page_budget():
+    pages = {
+        "https://example.com/a": _redirect("/b"),
+        "https://example.com/b": _redirect("/a"),
+    }
+    result, http = _crawl("https://example.com/a", pages, max_pages=50)
+    assert http.gets == ["https://example.com/a", "https://example.com/b"]
+    assert result.problems == []   # nothing went unread: both hops were fetched
+
+
+def test_a_redirect_chain_longer_than_the_hop_cap_says_where_it_stopped():
+    """max_pages would eventually stop this too, and would report it as a
+    truncated walk of a fifty-page site. The hop cap gets the diagnosis right."""
+    pages = {
+        f"https://example.com/h{i}": _redirect(f"/h{i + 1}") for i in range(12)
+    }
+    result, http = _crawl("https://example.com/h0", pages)
+    assert len(http.gets) == MAX_HOPS + 1
+    assert _kinds(result) == ["redirect-capped"]
+    assert result.incomplete()
+    assert f"after {MAX_HOPS} redirects" in result.problems[0].detail
+
+
+def test_a_304_is_not_a_redirect():
+    """`range(300, 400)` would make a cache revalidation into a reported coverage
+    gap. 304 means the client already has the body; 300 offers a list rather than
+    a destination."""
+    pages = {"https://example.com/": _Resp("", status_code=304)}
+    result, _ = _crawl("https://example.com/", pages)
+    assert result.problems == []
+
+
+def test_redirect_hops_count_against_max_pages():
+    """The bound is on requests this tool sends to somebody else's machine, and a
+    hop is a request. A chain that did not fit is a truncated walk, reported."""
+    pages = {
+        "https://example.com/a": _redirect("/b"),
+        "https://example.com/b": _redirect("/c"),
+        "https://example.com/c": _Resp("landed"),
+    }
+    result, http = _crawl("https://example.com/a", pages, max_pages=2)
+    assert len(http.gets) == 2
+    assert "truncated" in _kinds(result)
