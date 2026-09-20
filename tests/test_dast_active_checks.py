@@ -3,6 +3,7 @@ import html
 from urllib.parse import parse_qsl
 
 import httpx
+import pytest
 
 from scanner.core.egress import Egress
 from scanner.core.finding import FRAGMENT_MAX_LEN, Confidence, Severity
@@ -111,6 +112,43 @@ def test_sqli_error_is_detected_when_a_quote_triggers_a_db_error():
 def test_no_sqli_when_error_string_is_present_in_baseline_too():
     # The page always shows the error text, so our quote adds nothing.
     assert _run(check_sqli_error(_point(), _SqlHttp(always=True))) == []
+
+
+class _BaselinelessSqlHttp:
+    """Answers the tampered request with a database error and never answers the
+    untampered one — a timeout that lands on one request of two, a rate limiter that
+    sheds the first hit, a connection reset."""
+
+    _ERROR = "Warning: You have an error in your SQL syntax near ''' at line 1"
+
+    def __init__(self):
+        self.values = []
+
+    async def get(self, url, *, active=False, params=None, **kwargs):
+        val = dict(params or []).get("q", "")
+        self.values.append(val)
+        if "'" not in val:
+            raise TimeoutError("read timed out")
+        return _Resp(f"<html>{self._ERROR}</html>")
+
+
+def test_a_baseline_that_never_answered_cannot_become_a_sqli_finding():
+    """This check's entire claim is comparative: a database error appeared, and the
+    untampered request did not produce it. ``_send`` used to catch everything and
+    return ``None``, which ``_body`` reads as an empty page and ``_sql_error_family``
+    reads as "no error here" — so a baseline that timed out counted as a clean
+    baseline, and a HIGH SQL injection was reported on the strength of a comparison
+    against a request that never happened. A timeout is not evidence.
+
+    The failure it raises instead is recorded by ``run_check`` as a ``ScanError``, so
+    the run exits 3 and says which parameter it could not decide about. Pinned here
+    rather than guarded again in the check: the mechanism closed in D59, and a
+    ``baseline is None`` branch on top of a ``_send`` that cannot return ``None``
+    would be unreachable code standing in for a test."""
+    http = _BaselinelessSqlHttp()
+    with pytest.raises(TimeoutError):
+        _run(check_sqli_error(_point(), http))
+    assert http.values == ["hi"], "the probe must not be sent on an unusable baseline"
 
 
 class _LeakySqlHttp:

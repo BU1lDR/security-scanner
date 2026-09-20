@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 496 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 504 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1292,6 +1292,80 @@ than warning about it, and the reason that check could not catch this one: the k
 correctly. Nothing in this repo checks that a key spelled correctly is *used*, and the only
 defence is a test that asserts the behaviour rather than the plumbing — which is what the
 fifteen new ones do, at the three layers that enforce this and not at the one that names it.
+
+---
+
+### D61 — A budget checked once per check is not a budget, and a refused request is not traffic
+
+**`dast.active.max_requests` bounds what this tool sends to somebody else's machine, and
+it was kept by the loop that starts the checks rather than by the object that sends the
+requests.** The test was `counted.count >= max_requests`, evaluated once per (injection
+point, check) pair. `sqli-error` sends two requests — an untampered baseline, then the
+probe — so a check cleared at request four sent requests five *and* six. Measured over a
+real socket against the in-repo rehearsal site: a five-request budget put six on the wire.
+
+**The same counter charged for requests that were refused before they existed.** The tally
+incremented before delegating, and the request gate raises `OutOfScopeError` at the choke
+point, so a probe that never reached a socket spent budget anyway. A host in scope to
+crawl but absent from `scope.active_allowlist` could exhaust two hundred requests having
+sent none, and the report then carried "the request budget was reached" beside
+`active_requests_sent: 0`, which cannot both be true. Across two hosts it is worse than
+incoherent: the host nobody authorized eats the budget belonging to the host that was.
+
+**Both are fixed by moving the ceiling into `_CountingHttp`,** which is where the number
+already lived. A request that would exceed the budget raises `_BudgetReached` instead of
+being sent; a request the gate refused is not charged; a request that went out and timed
+out is, because the target received it. That is [D58]'s rule one layer in — count what the
+choke point actually dispatched — and it makes the bound exact rather than aspirational.
+
+**Dropping the loop's own test made the disclosure honest as a side effect.** Every check
+is now started, so `open-redirect` on a parameter that is not URL-shaped still reaches its
+correct empty verdict after the budget is gone instead of being tallied as surface nobody
+looked at. The number in "N (injection point, check) combinations were not completed" fell
+from 26 to 17 on the same run, and the seventeen are the ones that actually needed a
+request.
+
+**The rehearsal phase that was supposed to catch the first defect could not.** Its budget
+was four, and the checks cost one plus two per point, so a per-check ceiling and a per-
+request ceiling both stop at exactly four — removing the fix left the phase green. The
+budget is five now. That is [D57] again, and the second time the site's own shape rather
+than an assertion's wording was the thing that had to change: what a gate needs is a
+route.
+
+**Two tests in the same tier were watching nothing.**
+`test_check_filter_limits_which_checks_run` asserted only that the *unselected* check did
+not fire, which is equally true of a filter that selects nothing at all — the silent-
+narrowing failure `VALUE_CHOICES` exists to close was invisible to the test named after
+the filter. It now runs against a site that trips both checks and asserts the selected one
+came back, with a control proving the site trips both. And `check_sqli_error`'s claim is
+comparative — this database error appeared and the untampered request did not produce it —
+which [D59] made true by letting a failed baseline raise, with nothing anywhere asserting
+it. A baseline that timed out used to arrive as `None`, read as an empty page, and satisfy
+"no error in the baseline"; the check then reported HIGH SQL injection on a comparison
+against a request that was never answered. Removing [D59]'s change now turns exactly those
+two red and nothing else.
+
+**One thing deliberately not done:** no `if baseline is None` branch. `_send` cannot
+return `None` since [D59], so the guard would be unreachable code standing in for a test,
+which is the defect [D60] is about. The defence for an over-claim whose mechanism is
+already closed is an assertion that it stays closed.
+
+**`_selected_checks` now says when a name selected nothing,** though nothing reachable
+from `argv` can make it happen: `Config.load` rejects an unknown check name against a
+closed set with a did-you-mean, and that is the right place for it. `Config.from_dict` is
+lenient by design, and there the filter kept the intersection silently — so a single
+misspelt name ran zero checks while the engine reported the active tier as having run, and
+the empty findings list read as a clean bill of health. Of the directions that mistake can
+fail in, that is the worst, so the second line is there even though the first one holds.
+
+**Why:** A bound on what you send to a machine that is not yours is a promise to its
+owner, and the only version of that promise worth making is enforced where the sending
+happens. The rest follows from the same move: the number that counts is the number the
+transport saw, so a refusal costs nothing, a timeout costs one, and a count of untested
+work is a count of work that needed a request. The two test defects are that failure in
+the suite rather than in the source — an assertion that still holds when the feature is
+absent is not watching the feature — and they are why both source defects shipped in a
+tier whose tests all passed.
 
 ---
 

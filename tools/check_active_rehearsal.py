@@ -515,10 +515,18 @@ timeout_s = 10.0
 
 # Phase C. The budget, not the pacing, is what this config measures, so the rate
 # goes back up and the scope/crawler sections are left at their defaults.
-CAPPED_CONFIG = """
+#
+# Five, and the odd number is the whole point. This was 4, and 4 cannot catch the
+# defect C3 exists to catch: the checks cost 1 (xss) + 2 (sqli) per point, so a
+# per-check ceiling and a per-request ceiling both stop at exactly 4 and the phase
+# stayed green with the fix removed. At 5 the per-check version clears sqli-error
+# at four, sends its baseline, and sends the probe as request six (D57's rule —
+# what a gate needs is a route, not another assertion).
+CAPPED_BUDGET = 5
+CAPPED_CONFIG = f"""
 [dast.active]
 include_post = true
-max_requests = 4
+max_requests = {CAPPED_BUDGET}
 
 [http]
 per_host_rps = 25.0
@@ -1016,7 +1024,7 @@ def phase_c(checks: Checks, url: str, config_path: Path,
         0 < len(markers) < phase_a_probes,
         f"budget cut probe traffic ({len(markers)} vs {phase_a_probes})",
         f"expected between 1 and {phase_a_probes - 1} markers under a "
-        "4-request budget",
+        f"{CAPPED_BUDGET}-request budget",
     )
     # C2: the skipped combinations are reported, not silently dropped -- exit 0
     # does not mean the surface was covered.
@@ -1024,6 +1032,23 @@ def phase_c(checks: Checks, url: str, config_path: Path,
         "request budget" in (err or ""),
         "and said so on stderr",
         f"stderr={(err or '')[-300:]!r}",
+    )
+    # C3: the bound is exact, and this is the only place that can prove it -- the
+    # number compared here is the one the choke point handed to the transport
+    # (D58), against a real gate and the real checks. `sqli-error` sends two
+    # requests, and the ceiling used to be tested once per (point, check) pair, so
+    # a check cleared against the limit then walked past it. Pinned to `==` rather
+    # than `<=`: a budget that stops early for some other reason is also a budget
+    # that is not doing what this phase claims (D61).
+    try:
+        capped = json.loads(out).get("scan") or {}
+    except json.JSONDecodeError:
+        capped = {}
+    checks.expect(
+        capped.get("active_requests_sent") == CAPPED_BUDGET,
+        f"and sent exactly the {CAPPED_BUDGET} requests it was allowed",
+        f"active_requests_sent={capped.get('active_requests_sent')!r}, "
+        f"scan={capped!r}",
     )
 
 
@@ -1230,7 +1255,8 @@ def main() -> int:
         else:
             print("\n  -- B: the same scan with authorization withheld --")
             phase_b(checks, url, main_config)
-            print("\n  -- C: the same site under a 4-request budget --")
+            print(f"\n  -- C: the same site under a "
+                  f"{CAPPED_BUDGET}-request budget --")
             phase_c(checks, url, capped_config, probes)
             print("\n  -- D: a socket bound but never listened on --")
             phase_d(checks, main_config)
