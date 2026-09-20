@@ -51,8 +51,26 @@ jobs:
       # run before — and independently of — the environment whose floors it is
       # checking. A tool that needs the package installed to tell you the
       # package's install metadata is wrong is a tool with a cycle in it.
+      # Three outcomes, three annotations. The script distinguishes "a floor admits
+      # something vulnerable" (1) from "OSV was unreachable" (2) from "everything
+      # asked about was clean, but a spec could not be asked about at all" (3), and
+      # a bare `run:` would flatten all three back into the same red X — which is
+      # the conflation the exit codes were added to remove, rebuilt one layer up.
+      # All three still fail the job; only the annotation says what to do about it.
       - name: Query OSV for every declared floor
-        run: python tools/check_floors.py
+        run: |
+          set +e
+          python tools/check_floors.py
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "::notice::every declared spec was probed and none admits a known-vulnerable version" ;;
+            1) echo "::error::a dependency floor admits a known-vulnerable version — see the log for the verified clean version to move to" ;;
+            2) echo "::error::OSV was unreachable, so nothing was established. Re-run; if it persists, check https://status.osv.dev" ;;
+            3) echo "::warning::every spec that could be probed came back clean, and at least one could not be probed at all. Nothing queried was vulnerable, which is not the same as nothing being vulnerable — make the spec probeable (a >= or a pin) or decide deliberately that it stays unchecked" ;;
+            *) echo "::error::check_floors.py exited $code, which it is not documented to return" ;;
+          esac
+          exit $code
 
       # Runs even when the step above fails, so a failure report still carries the
       # machine-readable detail rather than only the console rendering.

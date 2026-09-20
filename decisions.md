@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 409 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 446 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -768,6 +768,115 @@ and [D50] added — the errors section, the coverage finding, the disclosure lin
 a human who already decided to open the file. `0` is read by a machine that decided not to.
 Fixing the renderers three times and leaving the integer alone meant the loud-failure policy
 held everywhere except the one channel that was load-bearing.
+
+### D55 — The floors guard said "all 6 floor(s) clean" over a pyproject declaring seven
+
+[D54] fixed this shape of bug in the scanner and missed the tool standing next to it.
+[D47] built `tools/check_floors.py` to ask OSV whether the lowest version each of our own
+dependency specs admits is vulnerable, and described it — accurately — as asking "about every
+`>=` floor in `pyproject.toml`". That sentence is the whole defect, sitting in the decision
+log in plain sight for eight entries: it names a *subset* of the specs a pyproject can hold,
+and it reads like a complete spec because nothing in it says what happens to the rest. What
+happened to the rest is that they were printed inside `declared_floors()` and then dropped:
+
+```python
+    out, unprobeable = [], []
+    for where, specs in sources:
+        for spec in specs:
+            parsed = lowest_admitted(spec)
+            if parsed is None:
+                unprobeable.append(f"{where}: {spec}")
+            else:
+                out.append((where, *parsed))
+    for spec in unprobeable:
+        print(f"  --   no >= floor to probe: {spec}")
+    return out                      # <- and `unprobeable` ends here
+```
+
+The list existed. It was named, it was populated, it was printed — and then it went out of
+scope, which is why this reads as finished code rather than as an oversight.
+
+They never reached `main()`, so they could not move `failed`, and `return 1 if failed else 0`
+had nothing else to go on. Worse than the exit code: the summary line printed
+`len(floors)` — the specs it had *managed to read* — as though it were the whole set. So
+replacing `cryptography>=50` with `cryptography==42.0.0`, the exact version this file's own
+docstring names as carrying several HIGH advisories, produced one `--` line, six `ok` lines,
+"all 6 floor(s) clean." and exit **0**. Measured, not reasoned about: nine distinct flaws at
+that version on the day it was tried.
+
+**A pin was excluded for the wrong reason.** The comment above the pattern read "an exact pin
+(`==`) has no range to probe", and that is backwards. A pin is the *most* precisely
+answerable spec on the page: exactly one version to ask about, no inference from a range at
+all. What a pin has no room for is the **remedy** — you cannot raise a floor that is also a
+ceiling — and that is a different sentence from "cannot be checked". The two were conflated,
+so the one spec shape somebody writes *in order to reproduce a bug* was the one shape the
+guard would not look at. `>=`, `==`, `===` and `~=` are now all probed. An exclusive `>` is
+still unprobeable and should be: the lowest version it admits is whatever PyPI publishes
+next, which is not a fact about this repository.
+
+Because the operator now varies, the advice has to as well — `raise the floor to >=50` printed
+under `cryptography==42.0.0` reads as inapplicable, and advice that reads as inapplicable
+gets ignored. A failing pin is told to *move*.
+
+**Exit 3 is [D54]'s, borrowed rather than invented.** Every spec that could be probed came
+back clean and one could not be probed at all: that is "ran, but do not read this as
+complete", which is what `3` already means in `ScanReport.exit_code`. An operator reading
+either should not have to learn two vocabularies. `2` stays "OSV was unreachable, so nothing was
+established" — a distinct unknown from a spec that was never askable, and the reason there
+are two codes for two kinds of ignorance rather than one for both. Precedence follows [D54]
+unchanged: a tree with both a confirmed finding and an unprobeable spec exits `1`, because
+`unprobeable` is ungraded in both directions and a named advisory is not.
+
+**The actual root cause was that this file had no tests.** `grep -rln check_floors tests/`
+returned nothing; the only reference anywhere was the workflow that runs it. Everything above
+is a defect a single test would have caught, in a file whose entire purpose is catching
+defects, and it survived because the code that checks our claims was the code exempt from
+being checked. `tests/test_check_floors.py` now covers all four exit codes, the operator
+parsing in both directions, the both-halves return from `declared_floors`, both remedy
+wordings, the `--json` shape, and `clean_floor`'s forward walk — including a regression test
+for the [D47] bug where it read the highest fixed-in off the advisories affecting the *start*
+version and so advised raising to a version that was itself vulnerable. How many tests that
+is, is not written here: `tools/check_test_count.py` matches `\b(\d+) tests\b` anywhere in
+this file, so a per-file count in this paragraph would be read as a claim about the whole
+suite — and it flagged this very sentence when the first draft quoted one. The pattern is
+broad on purpose and the right fix was to stop quoting, not to narrow it. Same rule as
+[D47]'s last paragraph: a count nobody can re-derive is worse than no count.
+
+Verified the way a test for a guard has to be: with the fix stashed, seventeen of them fail,
+and every one that targets the defect is among them. The rest pin behaviour that was already
+correct, which is what stops the next change here from trading one bug for another.
+
+They stub `query`. That is deliberate and it is also the boundary of what they prove: the
+suite runs with sockets blocked, and a test that asked the live database would go red on
+OSV's publishing schedule instead of on this repository's behaviour — the same reason this
+tool is not wired into per-push CI. What no test covers is the request body actually sent to
+OSV and the parsing of a real response; those are exercised only by the scheduled run.
+
+**A distinct code is not a distinct outcome, and the workflow had to be changed too.** To
+GitHub Actions every non-zero exit is the same red X, so `dependency-floors.yml` running a
+bare `python tools/check_floors.py` would have flattened 1, 2 and 3 back into one signal —
+this entry's own defect, rebuilt one layer up, in the file that consumes the codes. The step
+now branches on the status and emits a different annotation for each, including one for an
+undocumented code. All of them still fail the job; only the annotation says what to do.
+
+**What this defers.** `3` is reachable from a *legitimate* manifest — `>` and bare names are
+things people write on purpose — and there is no way to acknowledge one, so such a spec reds
+the weekly job until somebody makes it probeable. A permanently red scheduled job is the
+thing [D47] refused to build when it kept this check out of `ci.yml`, so this is a real cost
+and not a hypothetical one. The honest fix is an explicit opt-out in `pyproject.toml` that
+the script reads, so an unprobeable spec can be a recorded decision instead of a recurring
+alarm; that is not built here. It is bounded for now by the fact that the current manifest
+has none: all seven specs are probeable, so `3` is unreachable today and this is a trap for
+the next person rather than a live annoyance. It also does not make the guard run on a
+commit, so a pin added today is caught by the schedule, not by the push that added it.
+
+**Why:** A guard is trusted in proportion to how loudly it fails, and this one failed by
+counting only the things it had understood. That is the worst available behaviour, because
+"6 of 6 clean" and "6 of 7 clean" are the same sentence if you never publish the
+denominator — and the reader has no way to tell that the number shrank to fit what the tool
+could read. [D42]'s rule, that an unreachable database is an unknown answer and not a clean
+one, was already cited in this very file for the outage case. It had simply never been
+applied to the half of the problem that lives in the tree.
 
 ---
 
