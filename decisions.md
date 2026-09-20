@@ -6,8 +6,8 @@
 >
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
-**Last updated:** 2026-09-19
-**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 406 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Last updated:** 2026-09-20
+**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 409 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -88,6 +88,8 @@ If a single check crashes, it becomes a recorded "scan error" and the scan conti
 `0` = clean, `1` = findings at or above a chosen severity, `2` = the tool itself errored.
 **Why:** Lets the scanner slot into automated pipelines (e.g., "fail the build if a High-severity issue is found"). Same convention as the owner's other tools.
 
+> **Extended by [D54]:** `3` = the scan ran but did not finish, because some check recorded an error. Three codes could not express that, so it was spelled `0` — the same value as a target that was genuinely clean.
+
 ### D15 — Testing: test-driven, using fixtures instead of live targets
 Tests use saved/canned inputs (recorded web responses, sample dependency files, sample code snippets). The AI layer is faked in tests.
 **Why:** Tests must be fast, repeatable, and must never depend on a live website or a paid AI call.
@@ -163,7 +165,7 @@ Findings are rendered by a single `render(report, format)` function that dispatc
 The CLI only wires the pieces together — read config, build the scope, open the one HTTP client, run the engine, render the report — and adds no detection logic. It figures out on its own whether the target you typed is a URL or a code folder (an `http(s)://` prefix or a bare hostname like `example.com` is a website; an existing path is code), and it reports through a single exit code: **0** = clean, **1** = at least one finding at or above the severity threshold, **2** = the scan itself failed (bad config, bad target, an unexpected crash). For active checks it maps `--active` to "turn the mode on" and `--i-am-authorized` to the authorization acknowledgment (D25), and it adds *only the host you explicitly typed* to the active allowlist — never any other in-scope host a crawl might later discover. If you ask for active checks without acknowledging authorization, it says so and runs passive checks only rather than failing silently.
 **Why:** Exit codes are how this tool fits into automation (CI pipelines read them); making 0/1/2 mean exactly one thing keeps that contract clean. Auto-allowlisting *only the typed host* keeps the single-target common case ergonomic without weakening the real protection D25 provides — which is stopping active checks from bleeding onto *other* hosts the scanner wanders into.
 
-> **Superseded in part.** One clause above has since been overtaken, and the text is left standing because this file is a record rather than a specification. The bare-hostname half of the autodetection rule is **gone** ([D53]): a filename contains a dot too, so the promotion scanned `app.py` and `requirements.txt` as websites. The heading is left as it was written for the same reason the clause is.
+> **Superseded in part.** Two clauses above have since been overtaken, and the text is left standing because this file is a record rather than a specification. The bare-hostname half of the autodetection rule is **gone** ([D53]): a filename contains a dot too, so the promotion scanned `app.py` and `requirements.txt` as websites. And "three exit codes" is now four ([D54]): a recorded `ScanError` exits **3**, because the 0/1/2 set had no way to say "the scan did not finish" and used 0 for it. The heading is left as it was written for the same reason the clauses are.
 
 ### D32 — The SCA scanner: manifests → OSV → CVSS → one finding per known vulnerability
 The first real scanner is complete. It walks the target's code folder (skipping `.git`, `node_modules`, virtualenvs, build output), reads dependency files it understands — `requirements.txt`, `pyproject.toml`, `package.json`, `package-lock.json` — and resolves each *pinned* dependency to an exact name + version. It sends all of them to the OSV vulnerability database in **one batched request**, then fetches the full record for each vulnerability that comes back. Severity is taken from the advisory's **CVSS** score where present (we compute the 0–10 base score from the vector ourselves, following the v3.1 formula), falling back to the database's own rating, then to High. Each finding carries the exact manifest file and line it came from, the recommended upgrade, and a rich set of references (advisory pages, the OSV link, and every alias like the CVE number). A finding is marked **auto-applicable** only when a fixed version above the installed one exists — a dependency bump is the one code-adjacent change D12 lets us auto-apply.
@@ -667,6 +669,106 @@ got there was either a host the user could have typed a scheme for or a path tha
 where they thought. One of those costs eight characters; the other sends traffic to a
 stranger. That asymmetry, not the ergonomics, is the decision.
 
+### D54 — "We could not look" had the same exit code as "there is nothing wrong"
+
+[D42] and [D46] established the rule this violates: a check that could not run must not
+produce output that reads as a clean bill of health. Both fixed it *inside* the report —
+[D42] gave errors a visible section in all three renderers, [D46] turned missing SCA
+coverage into an actual finding. Neither reached the number the process exits with, and
+`ScanReport.exit_code` did not look at `self.errors` at all:
+
+```python
+if any(f.severity >= threshold for f in self.findings):
+    return 1
+return 0
+```
+
+So a scan in which every check died returned **0**. In CI that is a green tick, and a green
+tick is not a neutral outcome — it is a positive claim that the target was examined and
+found sound. The one consumer that reads exit codes rather than reports got the one answer
+that was certainly wrong.
+
+**The new code is 3, and it could not have been 2.** `2` is engine-level failure, and it is
+also what argparse returns for a usage error — `tests/test_cli.py` pins both. More
+importantly the two mean different things to an operator: `2` is "this run produced no
+report", `3` is "this run produced a report you should not trust to be complete". Losing
+that distinction would have traded one conflation for another. The contract's rule that a
+single crashing check is never `2` (§ on `ctx.run_check`) is unchanged; what changed is that
+a recorded `ScanError` is no longer consequence-free.
+
+**Precedence: a gate-able finding outranks an incomplete scan.** When a scan has both, it
+exits `1`, not `3`. This was the contested half and it was argued both ways before being
+settled, so the reasoning is recorded rather than implied by the order of two `if`s.
+
+The case for the other ordering is real: both outcomes fail a build, so the scalar's only
+job is classification, and `1` under this rule asserts something slightly false — "findings,
+and the run was complete." The errors a scan records here are typically *transient* (D42
+names an OSV 429 on the detail fan-out as the likeliest), so on the run that had findings,
+that incompleteness reaches only the report body and is then gone; nothing re-surfaces it,
+and v1 has no baseline layer that would make `1` a transient state on a real target.
+
+It lost because `errors` is ungraded in **both** directions, so a `3` cannot carry the
+meaning that ordering would give it.
+
+`errors != []` does not mean "the scan is materially incomplete". The list holds anything
+from an OSV 429 on one detail query to a crashed rule pack, with nothing distinguishing
+them. And `errors == []` does not mean complete: the active tier's request-budget
+exhaustion is only a `logger.warning` (`dast_active/scanner.py`), and a file that cannot be
+read is skipped with no record at all (`sast/scanner.py` does `if text is None: continue`
+*before* `ctx.run_check`, so an unreadable file is invisible to `errors` — measured with
+every file under `./src` unreadable: SAST yields 0 findings and 0 errors, contributing
+nothing whatsoever to the exit code). Letting an
+ungraded flag displace a specific, verified finding would enforce a completeness claim the
+data cannot support, in the direction that loses information: a CRITICAL is a precise fact
+about the target, a `3` is "something, somewhere, of unknown weight."
+
+Granularity is the secondary reason, and the honest version of it is weaker than it first
+looks. `ctx.run_check` is called once per source file, so a single file's failure does set
+the flag for a whole tree, and under the other ordering that one file would outrank a
+CRITICAL — a pipeline keying on `1` to open tickets would silently stop opening them. But
+the trigger is rare, not common: it needs `scan_text` to raise on text that was already read
+successfully, and `matcher._inert_spans` already catches `TokenError`, `SyntaxError`,
+`IndentationError` and `ValueError`, so even a broken or non-Python file returns cleanly.
+In practice that path is reachable mainly through a bug of ours. It is a real asymmetry in
+the failure mode, not a frequent event, and it is recorded here at its true weight because
+the first draft of this entry justified the ordering with an unreadable file — a case that
+records no error at all, and so could never have caused the masking it was cited for.
+
+The honest sequence remains to grade `ScanError` — a check that died versus an incidental
+per-file failure — *before* letting it outrank a finding, and that is the change this entry
+defers rather than makes. Grading is also what would let this precedence be revisited on
+evidence instead of argument.
+
+**What is already true and did not need fixing.** Errors with no gate-able finding return
+`3` under either ordering, so the specific hole [D42] and [D46] named — an empty report
+reading as clean — is closed. A third test pins the case between the two rules (findings
+present but all below the threshold, plus errors → `3`), because without it `exit_code`
+could return 0 whenever any finding existed and the precedence test would still pass.
+
+**The self-scan gate silently got stronger.** `tools/check_self_scan.py` asserts that
+scanning `./src` exits 0. That assertion now also requires the self-scan to record no
+errors. It records none today — verified, `errors: []` — so the gate passes unchanged, but
+from here a recorded `ScanError` fails CI instead of passing it. That is the feature, not a
+regression: the same policy applied to our own pipeline, and a gate that passes while the
+scan it performs is incomplete is the exact thing this entry is about.
+
+What can actually trigger it there is narrower than it sounds, and worth stating so the gate
+is not credited with coverage it does not have: the reachable sources are SAST's per-file
+`ctx.run_check` (a rule-pack crash on some file under `src/`) and SCA's
+`emit_error("sca", "discovery", …)`. **Not** an OSV outage. `./src` contains no dependency
+manifest, so `res.deps` is empty and `_analyze` returns at `if not queryable` before
+`OsvClient` is ever constructed — verified by rigging every httpx transport call to raise
+`ConnectError`, which left the scan at exit `0` with zero requests attempted. The gate is
+offline by construction (`check_self_scan.py` says so in its own docstring), and network
+availability is deliberately not among the things it can fail on.
+
+**Why:** An exit code is the only part of a report that automation reads, which makes it the
+only part where being quietly wrong is guaranteed to be acted on. Everything [D42], [D46]
+and [D50] added — the errors section, the coverage finding, the disclosure line — is read by
+a human who already decided to open the file. `0` is read by a machine that decided not to.
+Fixing the renderers three times and leaving the integer alone meant the loud-failure policy
+held everywhere except the one channel that was load-bearing.
+
 ---
 
 ## Part 3 — Concepts Glossary (plain language)
@@ -758,7 +860,7 @@ stranger. That asymmetry, not the ergonomics, is the decision.
 - **Request budget.** A hard cap (`dast.active.max_requests`) on how many active-check requests a scan may send, so a large site can't turn into a flood. Reaching it stops further checks and logs how many were skipped — never a silent partial scan. (See D38, and rate limiting above.)
 - **Fault isolation.** Running each check so that if it crashes, the crash is caught and recorded as a "scan error" and the rest of the scan keeps going. (See D13, D26.)
 - **Soft-404.** A page that says "not found" in its text but still returns a success (200) status. The exposed-file check calibrates against these so it doesn't report a file as "present" when the server is really just showing a friendly error.
-- **Exit code.** The single number a command hands back to whatever ran it. Automation (like a CI pipeline) reads it to decide pass/fail. Ours: `0` clean, `1` a finding met the threshold, `2` the scan broke. (See D31.)
+- **Exit code.** The single number a command hands back to whatever ran it. Automation (like a CI pipeline) reads it to decide pass/fail. Ours: `0` clean, `1` a finding met the threshold, `2` the scan broke, `3` the scan ran but some check errored so the report is incomplete. (See D31, D54.)
 - **Severity threshold.** The line above which a finding is serious enough to *fail* the run (exit 1). Findings below it are still reported; they just don't fail the build. Default: medium.
 - **Target autodetection.** How the CLI decides whether the thing you typed is a website or a code folder: an `http(s)://` prefix is a website; an existing path is code. Saves you from having to say which. It used to also promote a bare domain, which is why it no longer does — a filename contains a dot too. (See D31, D53.)
 - **Adversarial review.** Deliberately trying to break your own work — and independently double-checking each claimed flaw before trusting it — instead of just confirming it looks right. Applied to the core before any scanner was built on it. (See D29.)

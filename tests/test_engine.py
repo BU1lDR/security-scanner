@@ -1,5 +1,6 @@
 import asyncio
 
+from scanner.core.context import ScanError
 from scanner.core.engine import Engine, ScanReport, dedupe
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.location import Location
@@ -180,6 +181,44 @@ def test_exit_code_one_when_a_finding_meets_threshold():
 
 def test_exit_code_zero_for_empty_report():
     assert ScanReport(findings=[], errors=[]).exit_code(Severity.INFO) == 0
+
+
+def test_a_check_that_could_not_run_does_not_exit_clean():
+    """The D42/D46 conflation, at the exit code. An empty finding list because a
+    check died reads exactly like a clean target, and `errors` was ignored here, so
+    both exited 0. A CI job wired to that is green for a scan that did not happen."""
+    report = ScanReport(
+        findings=[],
+        errors=[ScanError(scanner="sca", check="osv", message="429 from OSV")],
+    )
+    assert report.exit_code(Severity.INFO) == 3
+
+
+def test_a_finding_at_the_threshold_outranks_an_incomplete_scan():
+    """Precedence, pinned rather than left to the order of two ifs. Both outcomes
+    fail a build, so the question is which fact the scalar carries: `errors` is
+    ungraded (a transient 429 and a crashed rule pack look identical, and an empty
+    list does not mean complete), so it must not displace a specific finding (D54).
+
+    The error below is shaped like a real one — SAST passes the display path as the
+    check name, one per source file — so this also pins that a single file's failure
+    cannot mask a CRITICAL."""
+    report = ScanReport(
+        findings=[_finding(severity=Severity.HIGH)],
+        errors=[ScanError(scanner="sast", check="config.py", message="boom")],
+    )
+    assert report.exit_code(Severity.HIGH) == 1
+
+
+def test_an_incomplete_scan_still_exits_three_when_findings_are_below_threshold():
+    """The gap between the two rules above: findings exist but none is gate-able, so
+    the errors decide. Without this, `exit_code` could return 0 whenever any finding
+    was present and the precedence test would still pass."""
+    report = ScanReport(
+        findings=[_finding(severity=Severity.LOW)],
+        errors=[ScanError(scanner="dast", check="crawl", message="seed 503")],
+    )
+    assert report.exit_code(Severity.HIGH) == 3
 
 
 # ── the report records what was done, not only what was found ────────────────

@@ -3,8 +3,14 @@
 Thin orchestrator over three testable units: :mod:`walk` (discover + read files),
 the rule pack (:mod:`rules`), and :mod:`matcher` (text -> redacted findings). It
 reads the ``sast.*`` config surface (enabled, exclude_dirs, min_confidence) and
-scans each file under fault isolation, so one unreadable or pathological file is
-recorded as a scan error and the rest continue (decisions.md D13).
+scans each file under fault isolation, so one file whose *scan* raises is recorded
+as a scan error and the rest continue (decisions.md D13).
+
+A file that cannot be *read* is a different case and is not recorded: ``walk`` returns
+None for oversized, binary and unreadable files, and the loop below skips those with
+``continue`` before ``ctx.run_check``. So they contribute nothing to ``report.errors``
+and cannot raise the exit code (D54). This docstring previously claimed the opposite,
+and that claim reached three other places before it was caught.
 
 There is no HTTP here — SAST is offline and needs only ``ctx.target.code_path``.
 """

@@ -147,7 +147,7 @@ you have a specific need for it to be ambient.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `reporting.format` | `"terminal"` | One of `terminal`, `json`, `html`. |
-| `reporting.severity_threshold` | `"medium"` | Findings at or above this make the run exit `1`. One of `info`, `low`, `medium`, `high`, `critical`. Exit `2` always means the scan itself failed, and is never a finding. |
+| `reporting.severity_threshold` | `"medium"` | Findings at or above this make the run exit `1`. One of `info`, `low`, `medium`, `high`, `critical`. Exit `2` always means the scan itself failed, and is never a finding; exit `3` means it ran but some check errored, so the threshold was applied to an incomplete report. |
 
 ## `sca` — dependency vulnerabilities
 

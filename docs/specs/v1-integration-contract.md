@@ -350,7 +350,10 @@ class ScanError:
 Scanners route every sub-check through `ctx.run_check(...)` (or wrap manually and
 call `ctx.emit_error`). A crashing check becomes a recorded `ScanError` and the
 scan continues (decisions.md D13). Exit code 2 is reserved for engine-level
-failure, never a single check crashing.
+failure, never a single check crashing. A recorded `ScanError` is not
+consequence-free, though: it makes the run exit **3** ("ran, but incomplete")
+rather than 0, so a scan whose checks died can no longer be mistaken for a clean
+target (decisions.md D54).
 
 The attribute is `http` (not `http_client`, not `client`). Per-scanner extras
 (e.g. a crawl result, an injection budget) are passed as plain arguments to that

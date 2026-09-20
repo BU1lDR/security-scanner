@@ -5,12 +5,23 @@ together — config, scope, the single HTTP choke point, the engine, the reporte
 but contains no detection logic of its own. Scanners register themselves with the
 default registry; the engine picks the applicable ones.
 
-Exit codes (decisions.md D14):
+Exit codes (decisions.md D14, extended by D54):
 
-- ``0`` — clean: no finding reached the severity threshold.
+- ``0`` — clean: no check reported an error, and no finding reached the severity
+  threshold.
 - ``1`` — at least one finding at or above the threshold.
 - ``2`` — engine-level failure (bad config, bad target, an error escaping the
   engine). Argparse also uses ``2`` for usage errors, which lines up.
+- ``3`` — the scan ran but is incomplete: some check recorded an error, so this
+  report cannot be read as a complete answer. Ranked *below* ``1`` — a finding
+  at or above the threshold is the more actionable fact and keeps the code it
+  has always had.
+
+``0`` is the absence of a recorded error, which is weaker than "every check ran":
+the active tier's request-budget exhaustion is only a log warning, and a file that
+cannot be read is skipped without a record, so both are invisible here. D54 names
+both gaps and defers the grading work that would close them. Do not read ``0`` as
+proof of coverage.
 
 Active/intrusive checks stay fail-closed. ``--active`` only requests them; they
 run only when the authorization is acknowledged (``--i-am-authorized`` or config)

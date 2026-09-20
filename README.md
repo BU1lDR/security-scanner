@@ -63,7 +63,9 @@ export ANTHROPIC_API_KEY=sk-...
 secscan path/to/code --ai
 ```
 
-The scan exits `0` when it's clean, `1` when it finds something at or above your severity threshold, and `2` if something actually broke. That's the usual convention, so it drops straight into a CI pipeline.
+The scan exits `0` when it's clean, `1` when it finds something at or above your severity threshold, `2` if something actually broke, and `3` when the scan ran but some check errored — meaning the report is real but not a complete answer. That's the usual convention, so it drops straight into a CI pipeline.
+
+If you branch on the exact code rather than on "nonzero", handle `3`. Treating it as pass is the failure this tool is most careful about elsewhere: a scan that could not finish looking should not report the same thing as a scan that looked and found nothing.
 
 ## Settings
 

@@ -83,10 +83,30 @@ class ScanReport:
         return bool(self.active_scanners_run)
 
     def exit_code(self, threshold: Severity) -> int:
-        """0 = clean, 1 = a finding at or above ``threshold``. (Exit code 2 is
-        reserved for engine-level failure and is decided at the CLI, D14.)"""
+        """0 = clean, 1 = a finding at or above ``threshold``, 3 = the scan ran but
+        some check recorded an error (D54). (Exit code 2 is reserved for
+        engine-level failure and is decided at the CLI, D14.)
+
+        ``errors`` used to be ignored here, so a scan whose checks died produced
+        an empty finding list and exited 0 — indistinguishable from a target that
+        was genuinely clean. That is the conflation D42 and D46 named: "we found
+        nothing" and "we could not look" must not be the same output.
+
+        **A finding at or above the threshold outranks an incomplete scan.** Both
+        fail a build, so the only question is which fact the one scalar carries,
+        and this ordering is deliberate rather than incidental: ``errors`` is
+        ungraded in both directions — it holds a transient 429 and a crashed rule
+        pack alike, and an empty list does not mean complete (see D54 for the two
+        measured gaps) — so letting it displace a specific, verified finding would
+        trade a precise fact for a vague one. The cost is real and is accepted: on
+        a scan that has findings, an error's incompleteness reaches the report
+        body but not the exit code. D54 records why that is the better trade and
+        what grading ``ScanError`` would let us revisit.
+        """
         if any(f.severity >= threshold for f in self.findings):
             return 1
+        if self.errors:
+            return 3
         return 0
 
 
