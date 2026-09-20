@@ -120,7 +120,9 @@ The active checks get the same treatment, against a deliberately-broken website 
 python tools/check_active_rehearsal.py
 ```
 
-Eight routes in matched pairs — one genuinely vulnerable, one where the same input is handled safely — so the run shows the checks are *right* rather than merely loud. It judges by the fake server's own log of what it received rather than by the scanner's exit code, because a crawl that never connects reports a clean site and exits `0`: the exit code is the one signal that can't tell you the scan happened. Then it runs the whole thing again with `--i-am-authorized` left off and requires that not one test payload reaches the socket. Everything it checks was confirmed by deliberately breaking the scanner eight different ways and watching it go red — see D56.
+Fourteen routes in matched pairs — one genuinely vulnerable, one where the same input is handled safely — so the run shows the checks are *right* rather than merely loud. The open-redirect check gets a third route, a `200` that also carries a `Location` header, because without it one of that check's two guards could be deleted with CI none the wiser: see D57. It judges by the fake server's own log of what it received rather than by the scanner's exit code, because a crawl that never connects reports a clean site and exits `0`: the exit code is the one signal that can't tell you the scan happened.
+
+Then it runs the same scan four more ways: with `--i-am-authorized` left off, requiring that not one test payload reaches the socket; under a request budget it has to respect and announce; against a port that is bound but never listening, where the scanner has to exit `3` and say why; and with the tier switched off in-process, against a positive control so that "sent no probes" is told apart from "never ran". Everything it checks was confirmed by deliberately breaking the scanner and watching it go red — six mutations, six red runs — see D56 and D57.
 
 ## Want to know how it works?
 

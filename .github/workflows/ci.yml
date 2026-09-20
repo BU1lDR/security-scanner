@@ -146,6 +146,10 @@ jobs:
       # yield zero injection points, and crawler._get swallows a refused
       # connection and returns None. Checked by mutation rather than assumed --
       # reverting the D51 POST bug, removing D52's bounding, and disabling each
-      # check's false-positive guard in turn each turn this step red. See D56.
+      # check's false-positive guard in turn each turn this step red. Both of the
+      # open-redirect check's guards count separately there: deleting its 3xx
+      # status test left this step green until the site gained a route that is a
+      # 200 carrying a Location header. See D56 and D57.
       - name: The active tier still does what it says, over a real socket
+        timeout-minutes: 5
         run: python tools/check_active_rehearsal.py

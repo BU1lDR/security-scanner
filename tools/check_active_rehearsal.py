@@ -15,23 +15,33 @@ attack-shaped traffic at somebody else's server is the worse of the two. A live
 run that is not repeatable expires: it describes a tree that has since moved.
 
 **Matched pairs, from D43.** Every check gets two routes -- one genuinely flawed,
-one with the flaw's guard in place -- and the assertion is an *exact* match on
-which rules fired per route. A target containing only flaws proves the checks
-fire, not that they are right, and this file's per-route equality is what catches
-a check that has started firing on everything:
+one with the flaw's guard in place -- and the assertion is exact set equality over
+``(rule_id, path, method, param)``, so a false negative and a false positive fail
+the same assertion. A target containing only flaws proves the checks fire, not
+that they are right:
 
 ===================  =====================================  ========================
 route                planted                                must report
 ===================  =====================================  ========================
 ``/reflect``         reflects ``q`` unescaped               ``xss-reflected``
 ``/reflect-safe``    the same, HTML-escaped                 nothing
-``/report``          DB error only when ``'`` is present    ``sqli-error``
-``/report-broken``   DB error regardless of input           nothing (unattributable)
-``/go``              honours ``next`` as a redirect         ``open-redirect``
-``/go-fixed``        302s to a fixed internal path          nothing
+``/find``            reflects a *form's* GET parameter       ``xss-reflected``
+``/report``          PostgreSQL error only when ``'`` present  ``sqli-error``
+``/report-broken``   MySQL error regardless of input        nothing (unattributable)
+``/go``              honours ``next`` as a 302              ``open-redirect``
+``/go-fixed``        302s to a fixed internal path          nothing (host guard)
+``/go-200``          200 *plus* a ``Location`` header       nothing (status guard)
 ``/long``            reflects a 4000-char *parameter name*  ``xss-reflected`` (D52)
 ``/comment``         reflects a POST body field             ``xss-reflected`` (D51)
 ===================  =====================================  ========================
+
+``/go-200`` is why this file was rewritten. D56 shipped eight mutations, each of
+which reddened the assertion written for it; re-running them found that deleting
+the open-redirect **3xx status** test changed nothing, because the only guarded
+redirect route returned a real 302 and the hostname test alone accounted for the
+negative. A guard whose removal keeps the gate green is the gate's own false
+negative. 200-with-a-``Location`` is an ordinary framework shape and makes that
+guard observable (D57).
 
 **Read the wire, not the exit code.** Every trap that makes this kind of
 rehearsal vacuous ends in a clean-looking exit 0: the crawler needs the literal
@@ -40,35 +50,45 @@ does not send one for you; ``crawler._get`` swallows every exception and returns
 ``None``, so connection-refused and a timed-out fetch leave no record; a redirect
 on the entry path empties the crawl. Asserting ``exit == 1`` would pass while the
 scanner never reached the site. So the server keeps its own log of every request
-it receives -- full method, full untruncated path, full body -- and the
+it receives -- time, method, full untruncated path, full body, ``Host``,
+``User-Agent``, ``Content-Type``, the status we answered with -- and the
 assertions are made against that. It is an independent witness: the scanner runs
 as a subprocess, so nothing it believes about itself can reach this log.
 
-**Both directions, as elsewhere in tools/.** The second half re-runs the same
-scan with ``--i-am-authorized`` withheld and requires that *zero* probe payloads
-reach the socket. One half alone is passable by a broken build: a scanner that
-sends nothing passes the refusal half, and one that ignores the gate entirely
-passes the first.
+**Every list-driven assertion names its expected length first.** D56's D52 block
+looped over a list of findings and ran zero assertions when the list was empty --
+a PASS whose meaning was "there was no finding to check". That is the one shape
+this file exists to refuse, so counts are asserted before loops throughout.
 
-**The positive control runs first**, because D43's first harness reported PASS on
-every case while the scanner registry was empty and nothing had run. An empty
-result read as a good result. Here, before any judgement about findings, the
-assertions require that requests actually arrived, that the active scanner was
-actually selected, and that probe payloads are actually present on the wire.
+**Five phases.** Authorized; authorization withheld; a four-request budget; a
+socket bound but never listened on (which must exit 3, not 0); and one
+in-process phase for the ``dast.active.enabled`` guard that argv cannot reach.
+The in-process phase runs its *positive* control first, because D43's first
+harness reported PASS on eight gate cases while the scanner registry was empty.
+
+**Two listeners.** ``127.0.0.1`` is the target. ``127.0.0.2`` is in
+``scope.allowed_hosts`` and *not* in the active allowlist, so the crawl reads it
+and no probe may reach it -- the witness for the per-request ``active=True`` gate,
+taken from the CLI rather than from a unit test. Linux and Windows bind all of
+127/8; a macOS contributor needs ``sudo ifconfig lo0 alias 127.0.0.2 up``. If the
+bind fails this file fails loudly: a silent skip is the vacuity it exists to
+prevent.
 
 Usage::
 
     python tools/check_active_rehearsal.py
 
 Loopback only, and no non-loopback network. The open-redirect probe names
-``example.org`` in a *parameter value*; the request itself goes to ``127.0.0.1``,
-and ``core/http.py`` builds its client with ``follow_redirects=False``, so the
-302 this site returns is read and never followed. The assertions check that the
-only host contacted was the loopback one.
+``example.org`` in a *parameter value*; the request itself goes to an ephemeral
+loopback port, and ``core/http.py`` builds its client with
+``follow_redirects=False``, so the 302 this site returns is read and never
+followed. The assertions check that the only hosts contacted were the two
+loopback ones.
 """
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import os
@@ -79,6 +99,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -94,7 +115,9 @@ SCAN_TIMEOUT_S = 240
 # them from scanner.scanners.dast_active.checks would make this file agree with
 # the code by construction: if a rename broke the probe, both sides would move
 # together and the assertion would still pass. These are pinned copies, so a
-# change to either has to be made deliberately in two places.
+# change to either has to be made deliberately in two places. (The cost is
+# stated rather than hidden: a coordinated two-sided rename is invisible here,
+# and tests/test_dast_active_checks.py owns the constants' values.)
 XSS_MARKER = "sxqz91kv7"
 XSS_SIGNATURE = f"<{XSS_MARKER}>"
 REDIRECT_PROBE_PATH = "secscan-open-redirect-probe"
@@ -103,13 +126,44 @@ REDIRECT_SENTINEL_HOST = "example.org"
 # A parameter name chosen by the *target*, long enough to exercise D52's bounding
 # on data that arrived over the network rather than from a fixture. Deliberately
 # free of any substring in the open-redirect hint list, so only the XSS check
-# fires on this route and the attribution stays unambiguous.
+# fires on this route and the attribution stays unambiguous. 4000 and not more:
+# BaseHTTPRequestHandler answers 414 past ~65k, and a 414 deletes the page from
+# the crawl, which would turn a D52 assertion into a route-availability one.
 LONG_NAME = "n" + "A" * 3999
+
+# What D52's bounding must turn that into: FRAGMENT_MAX_LEN is 120 and the
+# truncation marker is 15 characters, so 105 characters of name survive. Pinned,
+# not computed from the source, for the same reason the probes are.
+BOUNDED_LONG_NAME = "n" + "A" * 104 + "... (truncated)"
+
+# A cookie name the *target* chose that matches redaction.GITHUB_TOKEN
+# (ghp_ + 36 alphanumerics). scrub() runs on it inside the passive cookie check,
+# so the report must carry the masked form and never the raw one. A token-shaped
+# *name* rather than a token-shaped value in the SQL error, because scrub()
+# masking a canary would hand back a false pass on the non-leakage assertion.
+COOKIE_NAME = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+COOKIE_REDACTED = "ghp_" + "*" * 36
+
+# Shapeless strings planted in /report's database error. They are what a real
+# error page leaks -- a row's own data and the failing query -- and no redaction
+# layer can recognise them, so their absence from the report is a real result
+# rather than an artefact of scrub() having masked them (D44, D57).
+CANARIES = ("alice@example.com", "SELECT id", "FROM users")
 
 # Matches checks.py's MySQL group ("You have an error in your SQL syntax").
 MYSQL_ERROR = (
     "You have an error in your SQL syntax; check the manual that corresponds to "
     "your MySQL server version for the right syntax to use near ''' at line 1"
+)
+
+# Matches checks.py's PostgreSQL group, whose first pattern (PostgreSQL.*ERROR)
+# is the unbounded one -- it spans a line, so it is the signature whose match
+# could carry the most of somebody else's data into a report. Carries all three
+# canaries.
+POSTGRES_ERROR = (
+    "PostgreSQL ERROR: unterminated quoted string at or near \"'\"\n"
+    "LINE 1: SELECT id, email FROM users WHERE name = 'alice''\n"
+    "Detail: the row belonged to alice@example.com\n"
 )
 
 # Exploitation shapes the payloads must never contain (D8: detection-only). The
@@ -118,37 +172,69 @@ MYSQL_ERROR = (
 # it. Checked against the percent-decoded path and body of every request.
 FORBIDDEN = (
     "or 1=1", "union", "sleep(", "waitfor", "benchmark(", "drop table",
-    "xp_cmdshell", "<script", "onerror=", "onload=", "javascript:",
+    "xp_cmdshell", "<script", "onerror=", "onload=", "onfocus=", "javascript:",
+    "../", "..%2f", "%00", "etc/passwd", "--", "/*",
 )
 
-INDEX = f"""<!doctype html>
+# The shape of an honest agent string: name/version plus a contact URL. A scanner
+# that disguises itself as a browser is a different tool with a different consent
+# story, so the assertion is on the shape and not merely on "one distinct value".
+UA_SHAPE = re.compile(r"^secscan/\d+\.\d+\.\d+ \(\+https://\S+\)$")
+
+
+# --------------------------------------------------------------------------- #
+# the site
+# --------------------------------------------------------------------------- #
+
+#: Filled in once both listeners are up; the index page has to link to the
+#: second listener's ephemeral port.
+SITE: dict[str, int] = {"p1": 0, "p2": 0}
+
+
+def index_page() -> str:
+    """The entry page. Links every route the crawl is meant to reach, including
+    one on the second loopback address -- in scope for the crawl, absent from the
+    active allowlist. ``/find`` is deliberately *not* linked: it is reachable only
+    through the GET form on ``/forms``, so it also proves the form path produces
+    query injection points and not only body ones."""
+    return f"""<!doctype html>
 <html><body><h1>rehearsal target</h1>
+<a href="/forms">forms</a>
+<a href="/home">home</a>
+<a href="/guard">guard</a>
 <a href="/reflect?q=hello">reflect</a>
 <a href="/reflect-safe?q=hello">reflect-safe</a>
 <a href="/report?name=alice">report</a>
 <a href="/report-broken?name=alice">report-broken</a>
 <a href="/go?next=/home">go</a>
 <a href="/go-fixed?next=/home">go-fixed</a>
+<a href="/go-200?next=/home">go-200</a>
 <a href="/long?{LONG_NAME}=x">long</a>
-<a href="/form">form</a>
+<a href="http://127.0.0.2:{SITE['p2']}/cross?q=hi">cross</a>
 </body></html>"""
 
-# A hidden CSRF field beside the targeted one, so the run shows sibling fields
-# surviving at their captured values -- the property that makes a body probe
-# reach the application at all rather than bouncing off its CSRF check.
-FORM_PAGE = """<!doctype html>
+
+# Two forms. The GET one becomes a query injection point on a route no link
+# reaches. The POST one carries, beside the two targeted text fields: a hidden
+# CSRF token (preserved, never targeted -- the property that makes a body probe
+# reach the application instead of bouncing off its CSRF check), a checkbox pair
+# sharing one name (preserved at *both* values, which dict(params) would
+# collapse), and a submit button (a non-target type).
+FORMS_PAGE = """<!doctype html>
 <html><body>
+<form method="GET" action="/find">
+<input type="text" name="term" value="widget">
+</form>
 <form method="POST" action="/comment">
 <input type="hidden" name="csrfmiddlewaretoken" value="rehearsal-token">
+<input type="text" name="author" value="anon">
 <input type="text" name="comment" value="hi">
+<input type="checkbox" name="tags" value="a">
+<input type="checkbox" name="tags" value="b">
 <input type="submit" name="post" value="Post">
 </form>
 </body></html>"""
 
-
-# --------------------------------------------------------------------------- #
-# the site
-# --------------------------------------------------------------------------- #
 
 class Wire:
     """The server's own record of what it was sent. The independent witness."""
@@ -157,14 +243,16 @@ class Wire:
         self._lock = threading.Lock()
         self.requests: list[dict] = []
 
-    def record(self, method: str, path: str, body: str) -> None:
+    def begin(self, record: dict) -> dict:
         with self._lock:
-            # Untruncated, deliberately. A log that shortens what it stores
-            # cannot answer the question this gate exists to answer -- and a
-            # 4000-character parameter name is exactly what a truncating log
-            # hides. BaseHTTPRequestHandler.log_message truncates; it is
-            # silenced below in favour of this.
-            self.requests.append({"method": method, "path": path, "body": body})
+            # Appended on arrival and completed in the handler's finally:, so a
+            # handler that raises still leaves a record. Untruncated,
+            # deliberately -- a log that shortens what it stores cannot answer
+            # the question this gate exists to answer, and a 4000-character
+            # parameter name is exactly what a truncating log hides.
+            # BaseHTTPRequestHandler.log_message truncates; it is silenced below.
+            self.requests.append(record)
+        return record
 
     def snapshot(self) -> list[dict]:
         with self._lock:
@@ -184,21 +272,37 @@ class Handler(BaseHTTPRequestHandler):
     # single fetch, and crawler._get swallows the timeout -- a clean report over
     # a site that was never read.
     protocol_version = "HTTP/1.1"
-    server_version = "rehearsal/1.0"
+    server_version = "rehearsal"
+    sys_version = ""
 
     def log_message(self, fmt, *args):  # noqa: A003 - stdlib signature
-        pass  # superseded by Wire.record, which does not truncate
+        pass  # superseded by Wire, which does not truncate
 
     # -- plumbing ----------------------------------------------------------- #
+    def _begin(self, method: str, body: str) -> dict:
+        self._status = 0
+        self._location = ""
+        return WIRE.begin({
+            "t": time.monotonic(),
+            "method": method,
+            "path": self.path,
+            "body": body,
+            "host": self.headers.get("host", "") or "",
+            "ua": self.headers.get("user-agent", "") or "",
+            "ctype": self.headers.get("content-type", "") or "",
+            "status": 0,
+            "location": "",
+        })
+
     def _send(self, status: int, body: bytes = b"",
-              ctype: str = "text/html; charset=utf-8",
               extra: dict[str, str] | None = None) -> None:
+        self._status = status
+        self._location = (extra or {}).get("Location", "")
         self.send_response(status)
-        # Always present, always containing "html" for HTML: crawler._is_html
-        # looks for that literal substring and skips link and form extraction
-        # without it, which yields zero injection points and a healthy-looking
-        # empty result.
-        self.send_header("Content-Type", ctype)
+        # Always present, always containing "html": crawler._is_html looks for
+        # that literal substring and skips link and form extraction without it,
+        # which yields zero injection points and a healthy-looking empty result.
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         for key, value in (extra or {}).items():
             self.send_header(key, value)
@@ -212,49 +316,85 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- routes ------------------------------------------------------------- #
     def do_GET(self) -> None:  # noqa: N802 - stdlib signature
-        WIRE.record("GET", self.path, "")
+        record = self._begin("GET", "")
+        try:
+            self._route_get()
+        finally:
+            record["status"] = self._status
+            record["location"] = self._location
+
+    def _route_get(self) -> None:
         parts = urlsplit(self.path)
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
         path = parts.path
 
         if path == "/":
-            return self._send(200, INDEX.encode())
-        if path == "/form":
-            return self._send(200, FORM_PAGE.encode())
+            # A token-shaped cookie *name*, chosen by the target, so scrub()
+            # runs on live text rather than on a fixture. SameSite is present
+            # and Secure is not applicable over http, so exactly one cookie
+            # finding is produced and its param is the masked name.
+            return self._send(200, index_page().encode(), extra={
+                "Set-Cookie": f"{COOKIE_NAME}=1; SameSite=Lax; Path=/",
+            })
+        if path == "/forms":
+            return self._send(200, FORMS_PAGE.encode())
         if path == "/home":
             return self._send(200, self._page("<p>home</p>"))
+        if path == "/guard":
+            # The in-process phase's entry point: one link, one parameter, so
+            # that phase costs five requests instead of fifty.
+            return self._send(200, self._page(
+                '<a href="/reflect?q=hello">reflect</a>'))
 
-        # XSS pair -----------------------------------------------------------
+        # XSS trio -----------------------------------------------------------
         if path == "/reflect":
             return self._send(200, self._page(
                 f"<p>results for {query.get('q', '')}</p>"))
         if path == "/reflect-safe":
             return self._send(200, self._page(
                 f"<p>results for {html.escape(query.get('q', ''))}</p>"))
+        if path == "/find":
+            # Same flaw as /reflect, reached only through the GET form.
+            return self._send(200, self._page(
+                f"<p>matches for {query.get('term', '')}</p>"))
 
         # SQLi pair. Neither route reflects its input: the XSS check runs here
         # too, and a reflection would raise a second finding on these routes and
         # blur which check the pair is actually testing.
         if path == "/report":
             if "'" in query.get("name", ""):
-                return self._send(200, self._page(f"<p>{MYSQL_ERROR}</p>"))
+                # Shapeless canaries, in a <pre>, on the one signature that is
+                # unbounded. Nothing downstream can mask these, so their absence
+                # from the report means the check really does not quote bodies.
+                return self._send(200, self._page(
+                    f"<pre>{POSTGRES_ERROR}</pre>"))
             return self._send(200, self._page("<p>no such user</p>"))
         if path == "/report-broken":
             # Errors whatever it is sent, so the baseline request already carries
             # the signature and checks.py refuses to attribute it to the input.
+            # A different engine from /report, so the pair differs by engine as
+            # well as by guard.
             return self._send(200, self._page(f"<p>{MYSQL_ERROR}</p>"))
 
-        # open-redirect pair -------------------------------------------------
+        # open-redirect trio -------------------------------------------------
         if path == "/go":
             nxt = query.get("next", "")
-            if nxt.startswith(("http://", "https://")):
+            if nxt.startswith(("/", "http://", "https://")):
                 return self._send(302, b"", extra={"Location": nxt})
-            return self._send(200, self._page("<p>home</p>"))
+            # The 200 branch must not echo `next`: an XSS finding here would put
+            # /go in two matched pairs at once.
+            return self._send(200, self._page("<p>stay here</p>"))
         if path == "/go-fixed":
             # A real 3xx that ignores the parameter. Exercises the check's
-            # hostname test rather than its status test: the status passes and
-            # the Location host is not the sentinel, so there is no finding.
+            # hostname test: the status passes and the Location host is not the
+            # sentinel, so there is no finding.
             return self._send(302, b"", extra={"Location": "/home"})
+        if path == "/go-200":
+            # A 200 that *also* carries Location -- the shape frameworks produce
+            # when a handler sets the header and forgets the status. Exercises
+            # the check's 3xx status test, which nothing else here can falsify.
+            return self._send(200, self._page("<p>redirecting</p>"),
+                              extra={"Location": query.get("next", "")})
 
         # D52: a 4000-character parameter name, chosen by the target ----------
         if path == "/long":
@@ -263,28 +403,64 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, self._page(f"<p>echo {value}</p>"))
             return self._send(200, self._page("<p>nothing</p>"))
 
+        # the second listener ------------------------------------------------
+        if path == "/cross":
+            # The same flaw as /reflect. Nothing here may ever be reached by a
+            # probe: this host is in scope and not in the active allowlist.
+            return self._send(200, self._page(
+                f"<p>results for {query.get('q', '')}</p>"))
+
+        # Matches no dast.exposed signature, so the five calibration/.env/.git
+        # GETs produce nothing.
         return self._send(404, self._page("<p>not found</p>"))
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature
         length = int(self.headers.get("content-length") or 0)
         raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
-        WIRE.record("POST", self.path, raw)
-        fields = dict(parse_qsl(raw, keep_blank_values=True))
-        if urlsplit(self.path).path == "/comment":
-            return self._send(200, self._page(
-                f"<p>said {fields.get('comment', '')}</p>"))
-        return self._send(404, self._page("<p>not found</p>"))
+        record = self._begin("POST", raw)
+        try:
+            self._route_post(raw)
+        finally:
+            record["status"] = self._status
+            record["location"] = self._location
+
+    def _route_post(self, raw: str) -> None:
+        if urlsplit(self.path).path != "/comment":
+            return self._send(404, self._page("<p>not found</p>"))
+
+        # Three gates a real application would have, so a malformed probe
+        # cannot be mistaken for an accepted one. Without them a probe that
+        # dropped the content-type header, collapsed the checkbox pair, or lost
+        # the CSRF sibling would still get a 200 and still look fine on the
+        # wire.
+        ctype = (self.headers.get("content-type") or "").lower()
+        if not ctype.startswith("application/x-www-form-urlencoded"):
+            return self._send(415, self._page("<p>unsupported media type</p>"))
+
+        pairs = parse_qsl(raw, keep_blank_values=True)
+        fields = dict(pairs)
+        if fields.get("csrfmiddlewaretoken") != "rehearsal-token":
+            return self._send(403, self._page("<p>csrf check failed</p>"))
+        if len([v for n, v in pairs if n == "tags"]) != 2:
+            return self._send(400, self._page("<p>bad tags</p>"))
+
+        author = fields.get("author", "")
+        if "'" in author:
+            return self._send(200, self._page(f"<p>{MYSQL_ERROR}</p>"))
+        return self._send(200, self._page(
+            f"<p>by {html.escape(author)}</p>"
+            f"<div>{fields.get('comment', '')}</div>"))
 
 
-def start_site() -> tuple[ThreadingHTTPServer, int]:
-    """Bind 127.0.0.1 on an ephemeral port, and do not return until it accepts.
+def start_site(host: str) -> tuple[ThreadingHTTPServer, int]:
+    """Bind ``host`` on an ephemeral port, and do not return until it accepts.
 
     Port 0 rather than a fixed number so concurrent CI jobs on one runner cannot
     collide. The accept-poll closes the race the traps section names: if secscan
     starts first, every fetch is refused, crawler._get returns None for each, and
     the scan reports a clean site it never reached.
     """
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    srv = ThreadingHTTPServer((host, 0), Handler)
     srv.daemon_threads = True  # so shutdown cannot hang CI on a live connection
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -292,9 +468,10 @@ def start_site() -> tuple[ThreadingHTTPServer, int]:
     for _ in range(100):
         with socket.socket() as probe:
             probe.settimeout(0.25)
-            if probe.connect_ex(("127.0.0.1", port)) == 0:
+            if probe.connect_ex((host, port)) == 0:
                 return srv, port
-    raise RuntimeError(f"the rehearsal site never accepted on port {port}")
+        time.sleep(0.02)
+    raise RuntimeError(f"the rehearsal site never accepted on {host}:{port}")
 
 
 # --------------------------------------------------------------------------- #
@@ -311,10 +488,18 @@ def command() -> list[str]:
     return [found] if found else [sys.executable, "-m", "scanner.cli"]
 
 
-CONFIG = f"""
-# include_post has no CLI flag, so without this file the body path -- the exact
-# code path whose silently-empty POST shipped (D51) -- is unreachable from argv
-# and the rehearsal would quietly test only query parameters.
+# Phases A, B and D. include_post has no CLI flag, so without this file the body
+# path -- the exact code path whose silently-empty POST shipped (D51) -- is
+# unreachable from argv and the rehearsal would quietly test only query
+# parameters. allowed_hosts adds the second listener to the *crawl* boundary
+# without adding it to the active allowlist, which only the typed target host
+# joins. per_host_rps is low enough that the token bucket is measurable: 8 rps
+# over ~56 requests costs about six seconds and buys an assertion that the
+# limiter exists at all.
+MAIN_CONFIG = """
+[scope]
+allowed_hosts = ["127.0.0.2"]
+
 [dast.active]
 include_post = true
 max_requests = 200
@@ -324,18 +509,27 @@ max_depth = 2
 max_pages = 50
 
 [http]
-# The rate limiter is paced for somebody else's server. Over loopback it only
-# buys wall-clock in CI, and how it paces is a unit-testable property rather
-# than something this gate is positioned to observe.
+per_host_rps = 8.0
+timeout_s = 10.0
+"""
+
+# Phase C. The budget, not the pacing, is what this config measures, so the rate
+# goes back up and the scope/crawler sections are left at their defaults.
+CAPPED_CONFIG = """
+[dast.active]
+include_post = true
+max_requests = 4
+
+[http]
 per_host_rps = 25.0
 timeout_s = 10.0
 """
 
 
-def run_scan(port: int, config_path: Path, *, authorized: bool
+def run_scan(url: str, config_path: Path, *, authorized: bool
              ) -> tuple[int, str, str]:
     args = [
-        f"http://127.0.0.1:{port}/", "--active",
+        url, "--active",
         "--config", str(config_path), "--format", "json",
     ]
     if authorized:
@@ -355,6 +549,16 @@ def run_scan(port: int, config_path: Path, *, authorized: bool
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def capture(url: str, config_path: Path, *, authorized: bool
+            ) -> tuple[int, str, str, list[dict], float]:
+    """One scan, with the wire slice that belongs to it and its wall clock."""
+    WIRE.clear()
+    started = time.monotonic()
+    code, out, err = run_scan(url, config_path, authorized=authorized)
+    wall = time.monotonic() - started
+    return code, out, err, WIRE.snapshot(), wall
+
+
 # --------------------------------------------------------------------------- #
 # assertions
 # --------------------------------------------------------------------------- #
@@ -369,11 +573,14 @@ class Checks:
 
     def __init__(self) -> None:
         self.failures: list[str] = []
+        self.total = 0
 
     def ok(self, message: str) -> None:
+        self.total += 1
         print(f"  ok   {message}")
 
     def fail(self, message: str, *detail: str) -> None:
+        self.total += 1
         print(f"  FAIL {message}")
         for line in detail:
             print(f"         {line}")
@@ -387,242 +594,546 @@ class Checks:
         return bool(condition)
 
 
-#: route -> the exact set of active rule_ids that must be reported against it.
-EXPECTED: dict[str, set[str]] = {
-    "/reflect": {"dast.active.xss-reflected"},
-    "/reflect-safe": set(),
-    "/report": {"dast.active.sqli-error"},
-    "/report-broken": set(),
-    "/go": {"dast.active.open-redirect"},
-    "/go-fixed": set(),
-    "/long": {"dast.active.xss-reflected"},
-    "/comment": {"dast.active.xss-reflected"},
+#: The exact set of ``(rule_id, path, method, param)`` the active tier must
+#: report. Set equality, so a false negative and a false positive fail the same
+#: assertion -- and a check that has started firing on everything cannot hide
+#: behind a per-route count.
+EXPECTED: set[tuple[str, str, str, str]] = {
+    ("dast.active.xss-reflected", "/reflect", "GET", "q"),
+    ("dast.active.xss-reflected", "/find", "GET", "term"),
+    ("dast.active.xss-reflected", "/long", "GET", BOUNDED_LONG_NAME),
+    ("dast.active.xss-reflected", "/comment", "POST", "comment"),
+    ("dast.active.sqli-error", "/report", "GET", "name"),
+    ("dast.active.sqli-error", "/comment", "POST", "author"),
+    ("dast.active.open-redirect", "/go", "GET", "next"),
 }
 
+#: Arithmetic, not folklore: 13 injection points (9 query pages, 1 GET form
+#: field, 3 POST body fields) minus the one on 127.0.0.2 that the request gate
+#: refuses. One XSS probe per point carries the marker; the SQLi probe carries a
+#: quote and the redirect probe a URL, so neither is counted here. Adding a
+#: fourth active check or a URL-ish parameter should redden this -- that is the
+#: gate asking to be updated, not flaking.
+EXPECTED_PROBES = 12
 
-def decoded(request: dict) -> str:
-    return unquote(request["path"]) + " " + unquote(request["body"])
+#: 3 body injection points x (1 XSS request + 2 SQLi requests: baseline, probe).
+#: The open-redirect check sends nothing on these three: none of the names hints
+#: at a URL and none of the captured values looks like one.
+EXPECTED_POSTS = 9
+
+#: The three routes the open-redirect sentinel must be attempted against, so
+#: both of that check's guards are exercised and not merely reached.
+REDIRECT_ROUTES = {"/go", "/go-fixed", "/go-200"}
+
+#: Phase A's rate, repeated here because the floor is arithmetic from it.
+PHASE_A_RPS = 8.0
 
 
-def authorized_half(port: int, config_path: Path, checks: Checks) -> None:
-    WIRE.clear()
-    code, out, err = run_scan(port, config_path, authorized=True)
-    wire = WIRE.snapshot()
+def decoded(record: dict) -> str:
+    return unquote(record["path"]) + " " + unquote(record["body"])
 
-    # -- positive control, before any judgement about findings --------------- #
+
+def tags_of(record: dict) -> list[str]:
+    return [v for n, v in parse_qsl(record["body"], keep_blank_values=True)
+            if n == "tags"]
+
+
+def four_tuple(finding: dict) -> tuple[str, str, str, str]:
+    location = finding.get("location") or {}
+    return (
+        finding.get("rule_id") or "?",
+        urlsplit(location.get("url") or "").path,
+        location.get("method") or "",
+        location.get("param") or "",
+    )
+
+
+def pacing_floor(n: int, rps: float) -> float:
+    """The shortest span ``n`` paced requests can legitimately take.
+
+    One-directional on purpose: a burst plus scheduler noise makes "no faster
+    than rps" the flaky direction, so only the floor is asserted and a slow
+    runner can only make it safer. The free burst is subtracted because
+    TokenBucket's capacity is ``max(1.0, rate)`` -- the first ``rate`` requests
+    cost no time at all -- and the remaining half is margin.
+    """
+    return 0.5 * max(0.0, n - max(1.0, rps)) / rps
+
+
+# --------------------------------------------------------------------------- #
+# phase A -- authorized
+# --------------------------------------------------------------------------- #
+
+def phase_a(checks: Checks, url: str, config_path: Path,
+            hosts: tuple[str, str]) -> int | None:
+    """Returns phase A's marker count, or None if the hard bail tripped."""
+    code, out, err, wire, wall = capture(url, config_path, authorized=True)
+    print(f"  [{len(wire)} requests, wall {wall:.2f}s, exit {code}]")
+
+    # -- A1: positive control, before any judgement about findings ----------- #
     # D43's harness reported PASS on every gate case while the registry was
-    # empty and nothing had run at all. These four say the machinery moved.
+    # empty and nothing had run at all. If nothing arrived, nothing below this
+    # line carries information, so this returns rather than accumulating reds.
     if not checks.expect(
         bool(wire), "the site received requests",
         f"zero requests arrived; exit was {code}",
-        "the scanner never reached the site, so nothing below means anything",
-        (err or "")[-500:],
+        "the scanner never reached the site, so nothing after this would mean "
+        "anything -- bailing out rather than printing 41 vacuous passes",
+        (err or "")[-400:],
     ):
-        return
+        return None
 
     try:
         report = json.loads(out)
     except json.JSONDecodeError:
-        checks.fail("the JSON report parses", out[-1500:], (err or "")[-500:])
-        return
+        checks.fail("the JSON report parses", out[-1200:], (err or "")[-400:])
+        return None
 
     scan = report.get("scan") or {}
     findings = report.get("findings") or []
+    active = [f for f in findings if f.get("scanner") == "dast-active"]
+
+    # A2: _render_json omits "scan" entirely when nothing was recorded, which is
+    # the signature of a run that selected no scanner.
+    checks.expect("scan" in report, "the report carries a scan block",
+                  f"top-level keys were {sorted(report)}")
+    # A3
     checks.expect(
-        "dast-active" in (scan.get("active_scanners_run") or []),
-        "the active scanner was selected and recorded (D49)",
+        (scan.get("scanners_run") or []) == ["dast", "dast-active"],
+        "scanners_run == ['dast', 'dast-active']",
         f"scan block was {scan!r}",
     )
+    # A4: D50's disclosure -- what the tool *did*, not what it found.
     checks.expect(
         scan.get("sent_active_traffic") is True,
-        "the report discloses that active traffic was sent",
+        "the report discloses active traffic",
         f"sent_active_traffic was {scan.get('sent_active_traffic')!r}",
     )
+    # A5: the positive control proper. Payloads left the process and arrived.
     probes = [r for r in wire if XSS_MARKER in decoded(r)]
     checks.expect(
-        bool(probes), f"probe payloads reached the socket ({len(probes)} of "
-        f"{len(wire)} requests carried the marker)",
-        "requests arrived but none were active probes: the crawl found no "
-        "injection points, so every check below was skipped",
+        len(probes) == EXPECTED_PROBES,
+        f"probes on the wire ({len(probes)}/{len(wire)})",
+        f"expected {EXPECTED_PROBES} marker-carrying requests, one per "
+        f"injection point except the one on {hosts[1]} the gate refuses",
+        "zero would mean the crawl found no injection points (a response "
+        "without 'html' in Content-Type does that) and every check below was "
+        "skipped over an empty list",
     )
-
-    # -- the scan ran to completion ------------------------------------------ #
-    # Per D54 a recorded ScanError exits 3. Nothing here should error, and if
-    # something does, the findings are an incomplete answer rather than a clean
-    # one -- which is the whole point of that exit code.
+    # A6
     errors = report.get("errors") or []
     checks.expect(
-        not errors, "no check recorded an error",
+        not errors, "no errors",
         *[f"[{e.get('scanner')}/{e.get('check')}] {e.get('message')}"
           for e in errors],
     )
+    # A7: D14's threshold semantics.
     checks.expect(
-        code == 1, "exit 1: a finding at or above the threshold (D14)",
-        f"exit was {code}; errors={len(errors)}, findings={len(findings)}",
+        code == 1, f"exit 1 (got {code})",
+        f"errors={len(errors)}, findings={len(findings)}",
     )
 
-    # -- matched pairs: exact per-route equality ----------------------------- #
-    active = [f for f in findings if f.get("scanner") == "dast-active"]
-    by_route: dict[str, set[str]] = {path: set() for path in EXPECTED}
-    stray: list[str] = []
-    for finding in active:
-        url = (finding.get("location") or {}).get("url") or ""
-        path = urlsplit(url).path
-        if path in by_route:
-            by_route[path].add(finding.get("rule_id") or "?")
-        else:
-            stray.append(f"{finding.get('rule_id')} at {url}")
-
-    for path, expected in EXPECTED.items():
-        got = by_route[path]
-        if got == expected:
-            checks.ok(
-                f"{path}: {', '.join(sorted(expected)) if expected else 'nothing'}"
-                f" -- {'detected' if expected else 'correctly quiet'}"
-            )
-            continue
-        checks.fail(
-            f"{path}: expected {sorted(expected) or 'nothing'}, got {sorted(got)}",
-            "a missing rule is a false negative; an extra one is a false "
-            "positive and means the check fired where its guard should have held",
-        )
+    # -- A8: the matched pairs, as one set comparison ------------------------ #
+    got = {four_tuple(f) for f in active}
+    detail = [f"unexpected: {t}" for t in sorted(got - EXPECTED)]
+    detail += [f"missing:    {t}" for t in sorted(EXPECTED - got)]
     checks.expect(
-        not stray, "no active finding landed on an unexpected route", *stray,
+        got == EXPECTED, f"exact finding set ({len(EXPECTED)})",
+        *detail,
+        "a missing tuple is a false negative; an extra one is a false positive "
+        "and means a check fired where its guard should have held",
     )
 
     # -- the wire, read directly --------------------------------------------- #
     posts = [r for r in wire if r["method"] == "POST"]
+    # A9
     checks.expect(
-        bool(posts), "the body path ran: at least one POST reached the server",
-        "include_post was set, so zero POSTs means the crawler never turned the "
-        "form into an injection point, or the body never left the process (D51)",
+        len(posts) == EXPECTED_POSTS, f"POSTs arrived ({len(posts)})",
+        f"expected {EXPECTED_POSTS} = 3 body points x (1 xss + 2 sqli); zero "
+        "means the crawler never turned the form into an injection point, or "
+        "the body never left the process (D51)",
     )
-    probed = [r for r in posts if XSS_MARKER in r["body"]]
+    # A10: D51's explicit content-type. Without it httpx builds a sync byte
+    # stream that AsyncClient refuses, and the server answers 415.
     checks.expect(
-        bool(probed), "a POST body carried the probe, urlencoded",
-        *[f"POST {r['path']} body={r['body'][:160]!r}" for r in posts],
+        all(r["ctype"].startswith("application/x-www-form-urlencoded")
+            for r in posts),
+        "every POST declared urlencoded",
+        *[f"ctype={r['ctype']!r}" for r in posts
+          if not r["ctype"].startswith("application/x-www-form-urlencoded")],
     )
+    # A11: sibling preservation -- the reason a body probe reaches the app.
     checks.expect(
         all("csrfmiddlewaretoken=rehearsal-token" in r["body"] for r in posts),
-        "every POST kept the CSRF field at its captured value",
+        "csrf preserved on every POST",
         *[f"body={r['body'][:160]!r}" for r in posts
           if "csrfmiddlewaretoken=rehearsal-token" not in r["body"]],
     )
-
-    sentinel = [r for r in wire if REDIRECT_PROBE_PATH in decoded(r)]
+    # A12: none of the 415/403/400 gates tripped, so every POST above was a
+    # request the application actually accepted.
     checks.expect(
-        bool(sentinel),
-        f"the open-redirect sentinel was sent to loopback, not to "
-        f"{REDIRECT_SENTINEL_HOST}",
-        "the probe never went out, so the open-redirect finding above cannot "
-        "have come from a real 3xx",
+        all(r["status"] == 200 for r in posts),
+        "the server accepted every POST with 200",
+        *[f"{r['status']} {r['body'][:80]!r}" for r in posts
+          if r["status"] != 200],
     )
-
+    # A13: duplicate field names survive; dict(params) would collapse them and
+    # the server's 400 gate would catch it.
+    both = [r for r in posts if tags_of(r) == ["a", "b"]]
+    twice = [r for r in posts if len(tags_of(r)) == 2]
+    checks.expect(
+        len(twice) == len(posts) and len(both) >= 1,
+        f"a POST kept the repeated 'tags' field at both values ({len(both)})",
+        *[f"tags={tags_of(r)!r}" for r in posts if len(tags_of(r)) != 2],
+    )
+    # A14: both open-redirect guards exercised, not merely reached.
+    sentinel = [r for r in wire if REDIRECT_PROBE_PATH in decoded(r)]
+    hit = {urlsplit(r["path"]).path for r in sentinel}
+    checks.expect(
+        len(sentinel) == len(REDIRECT_ROUTES) and hit == REDIRECT_ROUTES,
+        f"sentinel sent to all three redirect routes (got {len(sentinel)})",
+        f"reached {sorted(hit)}, expected {sorted(REDIRECT_ROUTES)}",
+    )
+    # A15: D8. Every payload observes; none exploits.
     offenders = [
-        f"{r['method']} {decoded(r)[:120]!r} contains {bad!r}"
+        f"{r['method']} {decoded(r)[:100]!r} has {bad!r}"
         for r in wire for bad in FORBIDDEN if bad in decoded(r).lower()
     ]
     checks.expect(
-        not offenders,
-        f"every payload was detection-only across all {len(wire)} requests (D8)",
+        not offenders, f"detection-only across {len(wire)} requests",
         *offenders,
     )
+    # A16
+    expected_hosts = set(hosts)
+    seen_hosts = {r["host"] for r in wire}
+    checks.expect(
+        seen_hosts <= expected_hosts,
+        f"loopback only: {sorted(seen_hosts)}",
+        f"expected a subset of {sorted(expected_hosts)}",
+    )
+    # A17
+    agents = {r["ua"] for r in wire}
+    checks.expect(
+        len(agents) == 1 and UA_SHAPE.match(next(iter(agents)) or "") is not None,
+        f"one honest UA: {sorted(agents)}",
+        "expected exactly one agent of the shape "
+        "'secscan/X.Y.Z (+https://...)'",
+    )
+    # A18: the positive control for A19. Without it, "no probe reached the
+    # non-allowlisted host" would pass for a host nothing could reach.
+    crossed = [r for r in wire if r["host"].startswith("127.0.0.2")]
+    checks.expect(
+        len(crossed) == 1,
+        f"the crawl read the non-allowlisted spelling ({len(crossed)})",
+        "the second listener is in scope.allowed_hosts, so exactly one crawl "
+        "GET should arrive there",
+    )
+    # A19: the per-request active=True gate, observed from the CLI.
+    leaked = [f"{r['method']} {r['path'][:100]}" for r in crossed
+              if XSS_MARKER in decoded(r) or REDIRECT_PROBE_PATH in decoded(r)]
+    checks.expect(
+        not leaked,
+        "no probe went to the in-scope, non-allowlisted host",
+        *leaked,
+    )
+    # A20: the token bucket is real.
+    span = wire[-1]["t"] - wire[0]["t"]
+    floor = pacing_floor(len(wire), PHASE_A_RPS)
+    checks.expect(
+        span >= floor,
+        f"paced: {len(wire)} requests over {span:.2f}s, floor {floor:.2f}s",
+        f"at {PHASE_A_RPS} rps with a free burst of "
+        f"{max(1.0, PHASE_A_RPS)} that span is too short to have been paced",
+    )
 
-    # -- D52, on data the target chose -------------------------------------- #
+    # -- D52, on a name the target chose ------------------------------------- #
+    # A21: the request is not bounded, only the report is.
     verbatim = [r for r in wire if LONG_NAME in unquote(r["path"])]
     checks.expect(
-        bool(verbatim),
-        f"the {len(LONG_NAME)}-character parameter name went out verbatim",
+        len(verbatim) >= 1,
+        f"{len(LONG_NAME)}-char name went out verbatim ({len(verbatim)})",
         "the request is supposed to use point.param unmodified; only what is "
         "written into the report is bounded",
     )
-    long_findings = [
-        f for f in active
-        if (f.get("location") or {}).get("url", "").endswith("/long")
-    ]
-    for finding in long_findings:
-        param = (finding.get("location") or {}).get("param") or ""
-        evidence = finding.get("evidence") or ""
+    # A22: the count comes first. D56's version looped over this list and ran
+    # zero assertions when it was empty, which printed as a pass.
+    long_findings = [f for f in active
+                     if ((f.get("location") or {}).get("param") or ""
+                         ).startswith("nAAA")]
+    if checks.expect(
+        len(long_findings) == 1,
+        f"exactly one /long finding ({len(long_findings)})",
+        *[f"param={((f.get('location') or {}).get('param') or '')[:40]!r}"
+          for f in long_findings],
+    ):
+        param = (long_findings[0].get("location") or {}).get("param") or ""
+        evidence = long_findings[0].get("evidence") or ""
+        # A23
         checks.expect(
-            len(param) < len(LONG_NAME) and param.endswith("(truncated)"),
-            f"the report bounded that name to {len(param)} characters (D52)",
-            f"param was {len(param)} characters, ending {param[-20:]!r}",
+            param == BOUNDED_LONG_NAME and len(param) == 120,
+            f"bounded to 120 ({len(param)})",
+            f"param ended {param[-20:]!r}",
         )
+        # A24: the field cap did not eat the explanation.
         checks.expect(
-            "reflected into the response" in evidence,
-            "the evidence still explains what was wrong (D52)",
-            "the bounded name consumed the field budget and truncated away the "
-            "clause that said what the finding means",
+            "reflected into the response unescaped" in evidence
+            and evidence.endswith("are not being encoded."),
+            "evidence sentence intact",
             f"evidence={evidence[:200]!r}",
         )
+    else:
+        # Keep the assertion count stable and the reason visible: A23 and A24
+        # have nothing to read, and saying so is not the same as passing.
+        checks.fail("bounded to 120 (no finding)",
+                    "A22 failed, so there is no param to measure")
+        checks.fail("evidence sentence intact (no finding)",
+                    "A22 failed, so there is no evidence to read")
 
-    # The passive path is gated by this run too: check_self_scan.py scans a code
-    # target, so before this file nothing exercised dast either.
+    # -- D44: what crosses from the target's data into the report ------------ #
+    # A25. Paired with A8 and A26: this would pass trivially if /report never
+    # fired, and those two require that it did.
+    leaks = [c for c in CANARIES if c in out]
+    checks.expect(not leaks, "no target bytes in the report", *leaks)
+    # A26: the useful half survives redaction.
+    sqli = [f for f in active
+            if f.get("rule_id") == "dast.active.sqli-error"
+            and urlsplit((f.get("location") or {}).get("url") or "").path
+            == "/report"]
+    checks.expect(
+        len(sqli) == 1
+        and "PostgreSQL database error" in (sqli[0].get("evidence") or ""),
+        "the finding names the engine",
+        *[f"evidence={(f.get('evidence') or '')[:160]!r}" for f in sqli],
+    )
+    # A27: scrub() on text the target chose, not on a fixture.
+    checks.expect(
+        COOKIE_NAME not in out, "token-shaped cookie name redacted",
+        "the raw ghp_ token appears in the report",
+    )
+    # A28: redacted, not merely dropped. Without this A27 passes when no cookie
+    # finding exists at all.
+    cookie_params = [(f.get("location") or {}).get("param")
+                     for f in findings
+                     if (f.get("rule_id") or "").startswith("dast.cookies.")]
+    checks.expect(
+        COOKIE_REDACTED in cookie_params,
+        "and the redacted form is in the report",
+        f"dast.cookies params seen: {cookie_params!r}",
+    )
+    # A29: the DAST path as a whole. check_self_scan.py scans a code target, so
+    # before this file nothing exercised the passive tier either.
     checks.expect(
         any(f.get("scanner") == "dast" for f in findings),
-        "the passive DAST path also ran end-to-end",
+        "the passive tier also ran",
         "no passive finding against a site serving no security headers at all",
     )
+    return len(probes)
 
 
-def refusal_half(port: int, config_path: Path, checks: Checks) -> None:
+# --------------------------------------------------------------------------- #
+# phase B -- authorization withheld
+# --------------------------------------------------------------------------- #
+
+def phase_b(checks: Checks, url: str, config_path: Path) -> None:
     """The same scan with authorization withheld must send nothing.
 
     Without this half the file is passable by a build that ignores the gate
-    entirely; without the half above it is passable by one that sends nothing at
-    all. Neither direction alone says the gate carries information.
+    entirely; without phase A it is passable by one that sends nothing at all.
+    Neither direction alone says the gate carries information.
     """
-    WIRE.clear()
-    code, out, err = run_scan(port, config_path, authorized=False)
-    wire = WIRE.snapshot()
+    code, out, err, wire, _ = capture(url, config_path, authorized=False)
+    print(f"  [{len(wire)} requests, exit {code}]")
 
+    # B1: silence has to be refusal, not a failure to reach the host.
     checks.expect(
-        bool(wire),
-        "the passive-only run still reached the site (so its silence is "
-        "refusal, not a failure to connect)",
+        bool(wire), "the refusal run still connected",
         f"zero requests arrived; exit was {code}",
     )
+    # B2
     payloads = [
         f"{r['method']} {decoded(r)[:120]!r}"
         for r in wire
         if XSS_MARKER in decoded(r) or REDIRECT_PROBE_PATH in decoded(r)
     ]
-    if payloads:
-        # Spelled out rather than run through expect(), because the passing
-        # message ("not one payload, all passive") is a claim that would be false
-        # on the failing branch, and a gate that misdescribes its own failure
-        # sends the reader looking in the wrong place.
-        checks.fail(
-            f"{len(payloads)} probe payload(s) went out with no authorization: "
-            f"the fail-closed gate did not hold",
-            *payloads,
-        )
-    else:
-        checks.ok(
-            f"not one probe payload was sent without --i-am-authorized "
-            f"({len(wire)} requests, all passive)"
-        )
+    checks.expect(
+        not payloads,
+        f"no payload without --i-am-authorized ({len(wire)} reqs)",
+        *payloads,
+    )
+    # B3: the user is told, rather than getting a quietly smaller scan.
     checks.expect(
         "authorization is not acknowledged" in (err or ""),
-        "the refusal was announced on stderr rather than being silent",
+        "refusal announced on stderr",
         f"stderr={(err or '')[-300:]!r}",
     )
+    # B4: disclosure both ways.
     try:
         report = json.loads(out)
     except json.JSONDecodeError:
-        checks.fail("the JSON report parses for the refusal case", out[-800:])
+        checks.fail("report claims no active traffic", out[-800:])
         return
     scan = report.get("scan") or {}
     checks.expect(
         scan.get("sent_active_traffic") is False
         and not (scan.get("active_scanners_run") or []),
-        "the report does not claim active traffic it never sent (D49)",
+        "report claims no active traffic",
         f"scan block was {scan!r}",
     )
+
+
+# --------------------------------------------------------------------------- #
+# phase C -- the request budget
+# --------------------------------------------------------------------------- #
+
+def phase_c(checks: Checks, url: str, config_path: Path,
+            phase_a_probes: int) -> None:
+    code, out, err, wire, _ = capture(url, config_path, authorized=True)
+    markers = [r for r in wire if XSS_MARKER in decoded(r)]
+    print(f"  [{len(wire)} requests, {len(markers)} markers, exit {code}]")
+
+    # C1: measured against phase A rather than against a pinned number, because
+    # which (point, check) pairs fit inside four requests depends on crawl
+    # ordering. Both bounds matter: zero markers would also be "fewer".
     checks.expect(
-        not [f for f in (report.get("findings") or [])
-             if f.get("scanner") == "dast-active"],
-        "no active finding was reported",
+        0 < len(markers) < phase_a_probes,
+        f"budget cut probe traffic ({len(markers)} vs {phase_a_probes})",
+        f"expected between 1 and {phase_a_probes - 1} markers under a "
+        "4-request budget",
+    )
+    # C2: the skipped combinations are reported, not silently dropped -- exit 0
+    # does not mean the surface was covered.
+    checks.expect(
+        "request budget" in (err or ""),
+        "and said so on stderr",
+        f"stderr={(err or '')[-300:]!r}",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# phase D -- a socket bound but never listened on
+# --------------------------------------------------------------------------- #
+
+def phase_d(checks: Checks, config_path: Path) -> None:
+    """D56 said exit 3 was unreachable from a web target. It is one bind away."""
+    dead = socket.socket()
+    try:
+        dead.bind(("127.0.0.1", 0))
+        dead_port = dead.getsockname()[1]
+        code, out, err, wire, _ = capture(
+            f"http://127.0.0.1:{dead_port}/", config_path, authorized=True,
+        )
+    finally:
+        dead.close()
+
+    try:
+        report = json.loads(out)
+    except json.JSONDecodeError:
+        report = {}
+    errors = report.get("errors") or []
+    findings = report.get("findings") or []
+    scan = report.get("scan") or {}
+    print(f"  [exit {code}, errors {len(errors)}]")
+
+    # D1: D54's exit code, and the correction to D56.
+    checks.expect(code == 3, f"unreachable target exits 3 (got {code})",
+                  f"errors={len(errors)}, findings={len(findings)}")
+    # D2: the message text is platform/anyio wording and is deliberately not
+    # asserted; the scanner/check pair is ours.
+    checks.expect(
+        len(errors) == 1
+        and errors[0].get("scanner") == "dast"
+        and errors[0].get("check") == "response",
+        "and records the errors",
+        repr(errors)[:300],
+    )
+    # D3: 1 outranking 3 is only safe while this holds.
+    checks.expect(not findings, "with no findings to mask them",
+                  f"{len(findings)} findings on a host that never answered")
+    # D4: the dead-port run is really dead -- nothing leaked onto either
+    # listener, so D5 below is a statement about zero traffic.
+    checks.expect(
+        not wire, "and reached neither rehearsal site",
+        *[f"{r['method']} {r['path'][:80]}" for r in wire[:5]],
+    )
+    # D5: the known wart, pinned rather than argued about. sent_active_traffic
+    # is derived from selection, so the report is a third thing that cannot
+    # witness traffic -- which is why every other assertion here reads the
+    # server's log instead (D50).
+    checks.expect(
+        scan.get("sent_active_traffic") is True,
+        "the report still claims active traffic it never sent (D50)",
+        f"scan block was {scan!r}",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# phase E -- in-process, the guard argv cannot reach
+# --------------------------------------------------------------------------- #
+
+def phase_e(checks: Checks, port: int) -> None:
+    """``dast.active.enabled`` is defence in depth behind the CLI's own gate, so
+    no command line can turn it off while still selecting the scanner. Only an
+    in-process caller can, which is what D43's eight gate cases were about --
+    and D43's first harness passed all eight with an empty registry, so the
+    positive control runs first here."""
+    sys.path.insert(0, str(ROOT / "src"))
+    import scanner.scanners  # noqa: F401 - registration is a side effect
+    from scanner.core.config import Config
+    from scanner.core.egress import Egress
+    from scanner.core.engine import Engine
+    from scanner.core.gate import RequestGate
+    from scanner.core.http import AsyncHttpClient
+    from scanner.core.scope import Scope
+    from scanner.core.target import Target
+
+    def run(enabled: bool):
+        WIRE.clear()
+        config = Config.from_dict({
+            "dast": {
+                "enabled": False,  # only the active tier, so 5 requests not 55
+                "active": {"enabled": enabled, "max_requests": 200},
+            },
+            "http": {"per_host_rps": 25.0, "timeout_s": 10.0},
+        })
+        scope = Scope(
+            allowed_hosts={"127.0.0.1"},
+            active_allowlist={"127.0.0.1"},
+            authorized_ack=True,
+        )
+        target = Target(url=f"http://127.0.0.1:{port}/guard", scope=scope)
+
+        async def go():
+            gate = RequestGate(scope=scope, egress=Egress())
+            async with AsyncHttpClient(
+                gate, per_host_rps=25.0, timeout_s=10.0,
+            ) as http:
+                return await Engine().run(
+                    target, active_enabled=True, http=http, config=config,
+                )
+
+        report = asyncio.run(go())
+        wire = WIRE.snapshot()
+        return report, wire, [r for r in wire if XSS_MARKER in decoded(r)]
+
+    on_report, on_wire, on_probes = run(True)
+    off_report, off_wire, off_probes = run(False)
+    print(f"  [on: {len(on_wire)} reqs/{len(on_probes)} probes, "
+          f"off: {len(off_wire)} reqs/{len(off_probes)} probes]")
+
+    # E1: an API phase with only a negative case is exactly the shape that lies.
+    checks.expect(
+        "dast-active" in on_report.active_scanners_run
+        and len(on_probes) == 1
+        and len(on_report.findings) == 1,
+        f"positive control: enabled=true probes and reports "
+        f"({len(on_probes)} probes, {len(on_report.findings)} findings)",
+        f"active_scanners_run={on_report.active_scanners_run!r}, "
+        f"{len(on_wire)} requests, errors={len(on_report.errors)}",
+    )
+    # E2: the guard itself.
+    checks.expect(
+        not off_wire, "dast.active.enabled=false sent no probe",
+        *[f"{r['method']} {r['path'][:80]}" for r in off_wire[:5]],
     )
 
 
@@ -633,28 +1144,68 @@ def main() -> int:
     # character raises UnicodeEncodeError and the check then fails for a reason
     # that has nothing to do with what it checks.
     checks = Checks()
-    srv, port = start_site()
-    tmp = tempfile.mkdtemp(prefix="secscan-rehearsal-")
+    started = time.monotonic()
+
+    srv1, port1 = start_site("127.0.0.1")
+    SITE["p1"] = port1
     try:
-        config_path = Path(tmp) / "rehearsal.toml"
-        config_path.write_text(CONFIG, encoding="utf-8")
-        print(f"  -- authorized, against 127.0.0.1:{port} --")
-        authorized_half(port, config_path, checks)
-        print("\n  -- the same scan with authorization withheld --")
-        refusal_half(port, config_path, checks)
+        srv2, port2 = start_site("127.0.0.2")
+    except OSError as exc:
+        # Never a silent skip: without the second listener the request-level
+        # gate has no witness, and a gate with no witness is what this file
+        # exists to prevent. macOS needs `sudo ifconfig lo0 alias 127.0.0.2 up`.
+        srv1.shutdown()
+        srv1.server_close()
+        print("  FAIL the second loopback spelling (127.0.0.2) could not be "
+              "bound")
+        print(f"         {exc}")
+        return 1
+    SITE["p2"] = port2
+    hosts = (f"127.0.0.1:{port1}", f"127.0.0.2:{port2}")
+
+    tmp = tempfile.mkdtemp(prefix="secscan-rehearsal-")
+    bailed = False
+    try:
+        main_config = Path(tmp) / "main.toml"
+        main_config.write_text(MAIN_CONFIG, encoding="utf-8")
+        capped_config = Path(tmp) / "capped.toml"
+        capped_config.write_text(CAPPED_CONFIG, encoding="utf-8")
+        url = f"http://127.0.0.1:{port1}/"
+
+        print(f"  -- A: authorized, against {hosts[0]} "
+              f"(+ {hosts[1]} in scope, not allowlisted) --")
+        probes = phase_a(checks, url, main_config, hosts)
+        if probes is None:
+            bailed = True
+        else:
+            print("\n  -- B: the same scan with authorization withheld --")
+            phase_b(checks, url, main_config)
+            print("\n  -- C: the same site under a 4-request budget --")
+            phase_c(checks, url, capped_config, probes)
+            print("\n  -- D: a socket bound but never listened on --")
+            phase_d(checks, main_config)
+            print("\n  -- E: in-process, dast.active.enabled --")
+            phase_e(checks, port1)
     finally:
-        srv.shutdown()
-        srv.server_close()
+        for srv in (srv1, srv2):
+            srv.shutdown()
+            srv.server_close()
         # ignore_errors because on Windows a handle held a moment longer turns
         # cleanup into a failure of a check that had already passed.
         shutil.rmtree(tmp, ignore_errors=True)
 
+    wall = time.monotonic() - started
     if checks.failures:
-        print(f"\n  FAILED: {len(checks.failures)} assertion(s)")
+        print(f"\n  FAILED: {len(checks.failures)} of {checks.total} "
+              f"assertion(s) in {wall:.1f}s")
         for message in checks.failures:
             print(f"    - {message}")
+        if bailed:
+            print("    (bailed after the first assertion: nothing after it "
+                  "could have carried information)")
         return 1
-    print("\n  the active tier does what it says, over a real socket.")
+    print(f"\n  {checks.total} assertions, {wall:.1f}s: the active tier does "
+          f"what it says, over a real socket.")
     return 0
 
 

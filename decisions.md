@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 446 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 448 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -960,6 +960,11 @@ each on the assertion written for it — the Content-Type mutation reported `0 o
 carried the marker`, which is the vacuity the design is aimed at, caught by the positive
 control rather than by a wrong finding.
 
+> **Extended by [D57]:** A ninth mutation, absent from this list, left the step green:
+> deleting the 3xx status test in `check_open_redirect`. These eight were written alongside
+> the site, so not one of them asks a question the site is unable to express. D57 adds the
+> route that expresses it.
+
 **What it does not cover, said plainly.** It re-verifies one of D43's eight gate cases, the
 CLI-reachable one; the API-level cases, including the egress host planted into the active
 allowlist, are not here. It says nothing about pacing, because `http.per_host_rps` is
@@ -972,6 +977,12 @@ together and the assertion would still pass. And the three crawler traps above a
 conditions this gate *avoids*, not properties it verifies; that the crawler silently
 swallows a refused connection is still true, and is still only recorded here.
 
+> **Extended by [D57]:** The exit `3` sentence is false, and was reasoned rather than run.
+> A loopback port that is bound but never listening exits `3` with a DAST connection error
+> and no findings — no code target and no SCA involved — and that run is a scenario in the
+> gate as of D57. Pacing is asserted there too, against a floor computed from the configured
+> rate.
+
 **Why:** The active tier is the one part of this tool that can affect somebody else's
 machine, so it is the part whose safety claims should survive a change to the tree rather
 than a change to the reader's memory. A one-off verification is a statement about a commit;
@@ -980,6 +991,88 @@ the run that proves the point is always the one nobody did. [D55] landed the sam
 is the same shape one layer down: there the guard ran and published a denominator it had
 never measured, here the guard did not exist and this file said it had. Both are the code
 that checks our claims being the code that was exempt from being checked.
+
+---
+
+### D57 — The ninth mutation nobody wrote stayed green
+[D56] landed the gate on the active tier and proved it by breaking the scanner eight times:
+eight mutations, eight red steps, each on the assertion written for it. What that shows is
+that eight specific defects are caught. What it gets read as is that the gate is sound. A
+ninth mutation, written afterwards against the same committed gate, deleted the two lines in
+`check_open_redirect` that require a 3xx status before a `Location` header means anything —
+and the step stayed green, twenty-nine assertions of twenty-nine. That check has two guards,
+a status test and a sentinel-hostname test, and no route on the site could tell them apart:
+`/go-fixed` returns a real 302 to an internal path, so the hostname test alone accounts for
+its negative, and every route that is not a redirect at all returns no `Location` for the
+status test to have an opinion about. One of the two guards on the one check that can be
+turned into an open-redirect false positive was, as far as CI was concerned, decoration.
+D56's eight included dropping the hostname test; the status test was never among them, and
+that is the part worth naming — the mutations and the site were written together, so not one
+of them asks a question the site is unable to express.
+
+**The fix is a route, not an assertion.** `/go-200` returns `200` with a `Location` header:
+the shape a framework produces when a handler sets the header and forgets to return the
+redirect, which is what makes it the realistic case rather than a contrived one. Nothing
+else on the site produces it. With that route present, deleting the status guard fails at
+once and names the offending tuple — `unexpected: ('dast.active.open-redirect', '/go-200',
+'GET', 'next')`. The whole matrix re-run against the shipped code now kills six of six:
+reinstating D51's `data=`-a-list-of-pairs POST, removing [D52]'s `bounded()` call in
+`cookies.py`, deleting the XSS marker-came-back test, deleting the SQLi baseline
+suppression, and dropping each of the two open-redirect guards separately.
+
+**Expectations are tuples now.** D56 asserted a set of rule IDs per route, and two distinct
+defects pass that: a finding attributed to the wrong parameter, and one attributed to the
+wrong method on a route reachable by both. `/comment` has two vulnerable body fields beside
+each other and `/report` answers GET, so a report can be right about *what* it found and
+wrong about *where* while an exact per-route rule-ID set stays satisfied. The expectation is
+now `(rule_id, path, method, param)` and the failure prints the symmetric difference rather
+than a count.
+
+**The paragraph in D56 that said what it does not cover was the part that was wrong.** It
+said the gate cannot reach exit `3`, that nothing in the run records an error, and that the
+path which can is SCA discovery, needing a code target. Measured: point the scanner at a
+loopback port that is bound but never listening and it exits `3` with `errors: [{"scanner":
+"dast", "check": "response", "message": "All connection attempts failed"}]` and no findings.
+No code target, no SCA. That claim was reasoned from where errors were expected to come from
+instead of produced by running it — in the paragraph whose entire purpose was to say what
+had not been checked, which is D56's own failure mode one level up: a statement about
+coverage that reads like a measurement. The run is now a scenario, and it pins [D50]'s wart
+in place alongside it, because the same report that carries exit `3` and zero requests still
+claims it sent active traffic — that field is derived from which scanners were *selected*.
+An assertion that a bug is still present is not an endorsement of it; it is the only way to
+find out when it stops being true.
+
+**Four things D56 disclaimed are now asserted.** Pacing, from arithmetic rather than left
+out: 56 requests under a ceiling of 8 per second cannot finish in less than 3.00 seconds,
+and the run is held to that floor, so the rate limiter existing is no longer taken on faith.
+A second host, `127.0.0.2`, is in scope, absent from the active allowlist, and linked from
+the crawlable HTML — the crawl must read it and no probe may reach it, which is one of
+[D43]'s API-level gate cases D56 recorded as missing. Every request is checked to carry
+exactly one User-Agent and for it to be the honest one. And `dast.active.enabled = false` is
+exercised in-process against a positive control, so "no probes were sent" is told apart from
+"nothing ran".
+
+**Nothing inside a gate notices its own absence.** Delete the CI step that runs
+`check_active_rehearsal.py` and every test stays green while the tier stops being gated —
+D56's hazard one layer out, applied to D56's own fix. `tests/test_ci_workflow.py` asserts
+both directions, in text rather than YAML so it needs no dependency and survives the
+`--disable-socket` leg: every `tools/check_*.py` is named by a `run:` scalar in some
+workflow, and every tool a `run:` scalar names is on disk. Only `run:` counts, because
+`check_floors.py` also appears in a `paths:` filter and both workflows discuss tools in
+prose, so matching the whole file text would let a comment stand in for an invocation. Both
+workflow files are read, because `check_floors.py` is gated by `dependency-floors.yml` on a
+timer, and scanning `ci.yml` alone would report the one deliberately-placed tool as ungated.
+
+**Why:** A gate is only as good as the mutations somebody thought to write against it, and
+those are written by whoever built the site it runs against, so the question that matters is
+not whether the mutations were caught but which defects the site is incapable of expressing.
+Here the answer was one of the two guards on the check with the most dangerous false
+positive. The larger lesson is the one D56 states correctly and then demonstrates against
+itself: in a record like this one, the paragraph listing what was *not* checked is the
+paragraph most likely to be reasoned instead of run, because nothing anywhere forces it to
+execute. So it was executed, and two of its sentences did not survive. Both corrections came
+from a pass over the committed artifact by someone who had not written it, which is the only
+kind of pass that could have found them.
 
 ---
 
