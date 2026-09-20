@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 405 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 406 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -162,6 +162,8 @@ Findings are rendered by a single `render(report, format)` function that dispatc
 ### D31 — The `secscan` command line is a thin harness with three exit codes
 The CLI only wires the pieces together — read config, build the scope, open the one HTTP client, run the engine, render the report — and adds no detection logic. It figures out on its own whether the target you typed is a URL or a code folder (an `http(s)://` prefix or a bare hostname like `example.com` is a website; an existing path is code), and it reports through a single exit code: **0** = clean, **1** = at least one finding at or above the severity threshold, **2** = the scan itself failed (bad config, bad target, an unexpected crash). For active checks it maps `--active` to "turn the mode on" and `--i-am-authorized` to the authorization acknowledgment (D25), and it adds *only the host you explicitly typed* to the active allowlist — never any other in-scope host a crawl might later discover. If you ask for active checks without acknowledging authorization, it says so and runs passive checks only rather than failing silently.
 **Why:** Exit codes are how this tool fits into automation (CI pipelines read them); making 0/1/2 mean exactly one thing keeps that contract clean. Auto-allowlisting *only the typed host* keeps the single-target common case ergonomic without weakening the real protection D25 provides — which is stopping active checks from bleeding onto *other* hosts the scanner wanders into.
+
+> **Superseded in part.** One clause above has since been overtaken, and the text is left standing because this file is a record rather than a specification. The bare-hostname half of the autodetection rule is **gone** ([D53]): a filename contains a dot too, so the promotion scanned `app.py` and `requirements.txt` as websites. The heading is left as it was written for the same reason the clause is.
 
 ### D32 — The SCA scanner: manifests → OSV → CVSS → one finding per known vulnerability
 The first real scanner is complete. It walks the target's code folder (skipping `.git`, `node_modules`, virtualenvs, build output), reads dependency files it understands — `requirements.txt`, `pyproject.toml`, `package.json`, `package-lock.json` — and resolves each *pinned* dependency to an exact name + version. It sends all of them to the OSV vulnerability database in **one batched request**, then fetches the full record for each vulnerability that comes back. Severity is taken from the advisory's **CVSS** score where present (we compute the 0–10 base score from the vector ourselves, following the v3.1 formula), falling back to the database's own rating, then to High. Each finding carries the exact manifest file and line it came from, the recommended upgrade, and a rich set of references (advisory pages, the OSV link, and every alias like the CVE number). A finding is marked **auto-applicable** only when a fixed version above the installed one exists — a dependency bump is the one code-adjacent change D12 lets us auto-apply.
@@ -595,6 +597,76 @@ the check on the same line as the decision to trust, which is the only place the
 obvious: whoever writes `f"Cookie '{name}'"` knows `name` came from the target. Whoever
 reads `Finding(...)` eight call sites later does not.
 
+### D53 — A dot is not a hostname, and the scanner was choosing strangers on the strength of one
+
+[D31] gave the CLI target autodetection: "an `http(s)://` prefix or a bare hostname like
+`example.com` is a website; an existing path is code." The second clause was implemented as
+a regex and a dot — `_HOSTLIKE.match(raw) and "." in raw` — reached only after
+`Path(raw).exists()` had already failed. A dot is the single most common character in a
+filename, so the branch's real rule was *"if it isn't a file that exists, and it has a dot
+in it, it is a website."*
+
+**What it actually accepted.** Confirmed by running it: `app.py`, `main.sh`,
+`requirements.txt`, `setup.cfg` and `web.app` all became `https://…` targets. These are not
+contrived. `.py` is Paraguay's country-code TLD and `web.app` is a live Google TLD, so
+those two are registrable domains that somebody owns, and the rest fail DNS only for as
+long as nobody registers them. Meanwhile `localhost:8080` — the single most common real
+target during development — did *not* promote, because it has no dot. The ergonomic covered
+dotted strangers and rejected the actual use case.
+
+**Why this was worse than a bad guess.** `_build_target` does not merely scan the host it
+inferred; it grants it. The guessed host is added to `scope.allowed_hosts`, and under
+`--active` to `scope.active_allowlist`, on the reasoning [D31] states out loud — "the
+explicitly-typed target host is the strongest signal of intent." That reasoning is sound
+for a host somebody typed as a host. A promoted filename was never typed as a host at all,
+so the sentence was carrying weight it had not earned: `secscan app.py --active
+--i-am-authorized` built `Scope(allowed_hosts={'app.py'}, active_allowlist={'app.py'},
+authorized_ack=True)`, and `RequestGate.authorize` then waved injection payloads through to
+a third party's machine. The gate was working perfectly. It had been told the typo was the
+target.
+
+**The fix is a deletion, and the invariant is what makes it a fix.** The promotion branch,
+`_HOSTLIKE` and the now-unused `import re` are gone, and `_classify_target` can no longer
+return kind `"url"` for a string carrying no scheme — a property of a pure function that a
+unit test can state, which is the point. The considered alternative was to keep the
+promotion but require the host to be present in `scope.allowed_hosts` already, so a typo
+could never be promoted. It was rejected on two grounds: `allowed_hosts` defaults to `[]`,
+so on any install without a config file it is behaviourally identical to deleting the
+branch while adding a coupling from argument parsing to config; and it leaves the
+escalation open for any host that *is* in scope, converting a host an operator had
+deliberately kept out of `active_allowlist` into an authorized target on a typo.
+
+**The error message does not guess either.** It gives the resolved absolute path (the usual
+cause is being in a different directory than you thought) and then states the rule: a
+target is a path that exists, or a URL with an explicit scheme. It deliberately does *not*
+print a `https://{raw}` suggestion, because for the common case — a mistyped path — the
+suggestion is nonsense, and a scanner that proposes a URL it invented is precisely how this
+branch came to exist.
+
+**What it costs, measured.** Nothing in the documentation. Every example in `README.md`,
+`docs/`, and both CI workflows already types an explicit scheme or a path; the only places
+that advertised the bare form were the argparse help string, this function's docstring,
+[D31], the glossary entry, and one test. Bare hosts *are* the convention in `nmap`,
+`sslyze` and `nikto`, so `secscan example.com` erroring will read as a defect to anyone
+coming from those — which is why the message names the form that works instead of only
+refusing.
+
+**What it does not fix.** The scope-from-argv rule itself survives. `secscan https://app.py
+--active --i-am-authorized` still adds `app.py` to both allowlists, because now it *was*
+explicitly typed as a host — and that is the correct reading of [D31], but it means the
+protection here comes from the typo no longer being silent rather than from the grant being
+narrower. Separately, `Path(raw).exists()` is still checked first, so a directory named
+`example.com` in the working directory makes `secscan example.com` a code scan. That is
+unambiguous now that the alternative is an error rather than a website, but it is the same
+shape one step along: the classifier still infers intent from the filesystem.
+
+**Why:** A convenience that can only be reached *by mistake* is not a convenience. The
+promotion branch was unreachable for any input a user meant as a host and a path at the
+same time — by construction, since `Path(raw).exists()` runs first — so every string that
+got there was either a host the user could have typed a scheme for or a path that was not
+where they thought. One of those costs eight characters; the other sends traffic to a
+stranger. That asymmetry, not the ergonomics, is the decision.
+
 ---
 
 ## Part 3 — Concepts Glossary (plain language)
@@ -688,7 +760,7 @@ reads `Finding(...)` eight call sites later does not.
 - **Soft-404.** A page that says "not found" in its text but still returns a success (200) status. The exposed-file check calibrates against these so it doesn't report a file as "present" when the server is really just showing a friendly error.
 - **Exit code.** The single number a command hands back to whatever ran it. Automation (like a CI pipeline) reads it to decide pass/fail. Ours: `0` clean, `1` a finding met the threshold, `2` the scan broke. (See D31.)
 - **Severity threshold.** The line above which a finding is serious enough to *fail* the run (exit 1). Findings below it are still reported; they just don't fail the build. Default: medium.
-- **Target autodetection.** How the CLI decides whether the thing you typed is a website or a code folder: an `http(s)://` prefix or a bare domain is a website; an existing path is code. Saves you from having to say which. (See D31.)
+- **Target autodetection.** How the CLI decides whether the thing you typed is a website or a code folder: an `http(s)://` prefix is a website; an existing path is code. Saves you from having to say which. It used to also promote a bare domain, which is why it no longer does — a filename contains a dot too. (See D31, D53.)
 - **Adversarial review.** Deliberately trying to break your own work — and independently double-checking each claimed flaw before trusting it — instead of just confirming it looks right. Applied to the core before any scanner was built on it. (See D29.)
 - **Manifest vs. lockfile.** A *manifest* is the file where you declare what your app depends on (`requirements.txt`, `pyproject.toml`, `package.json`). A *lockfile* (`package-lock.json`) additionally records the exact resolved version of every transitive dependency. SCA reads both; only exactly-pinned versions can be checked. (See D32.)
 - **CVSS.** The industry-standard way to score how severe a vulnerability is, from 0 to 10, computed from a short "vector" string describing the attack (how it's reached, how hard it is, what it damages). We compute the base score from the vector ourselves so severities are accurate rather than a guess. (See D32.)

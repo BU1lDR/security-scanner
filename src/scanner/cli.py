@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -44,8 +43,6 @@ from scanner.core.target import Target
 # default registry the Engine uses.
 import scanner.scanners  # noqa: E402,F401
 
-_HOSTLIKE = re.compile(r"^[a-zA-Z0-9.-]+(?::\d+)?$")
-
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -54,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "target",
-        help="URL (https://…), bare host (example.com), or a local code path.",
+        help="URL with an explicit scheme (https://example.com) or a local code path.",
     )
     p.add_argument(
         "--config",
@@ -107,8 +104,18 @@ def _classify_target(raw: str) -> tuple[str, str]:
     """Return ``("url", url)`` or ``("code", path)``.
 
     A ``http(s)://`` prefix is a URL; any other scheme is refused. An existing
-    filesystem path is code. A bare hostname (``example.com[:port]``) is promoted
-    to an ``https://`` URL. Anything else is a bad target and raises.
+    filesystem path is code. Anything else is a bad target and raises.
+
+    **Naming a website requires the scheme.** A bare ``example.com`` used to be
+    promoted to ``https://example.com``, and the only thing separating a hostname
+    from a filename was a dot — the single most common character in a filename. So
+    ``app.py``, ``main.sh``, ``requirements.txt`` and ``web.app`` were all promoted
+    and scanned, at whatever host owns those names; ``.py`` is Paraguay's ccTLD and
+    ``web.app`` is a live Google TLD. :func:`_build_target` then added that
+    stranger's host to ``allowed_hosts``, and under ``--active`` to
+    ``active_allowlist``, so the request gate authorized the typo. Requiring the
+    scheme is the invariant that removes the guess: this function never returns
+    kind ``"url"`` for a string that does not carry one (D53).
 
     That last case used to return ``("code", raw)`` and defer to "the
     scanners/target validation" — which did not exist. ``Target`` is a value
@@ -128,14 +135,16 @@ def _classify_target(raw: str) -> tuple[str, str]:
         )
     if Path(raw).exists():
         return "code", raw
-    if _HOSTLIKE.match(raw) and "." in raw:
-        return "url", f"https://{raw}"
     # Resolved absolute path in the message, because the usual cause is being in
     # a different directory than you thought, and the relative path you typed
-    # back at you does not help you see that.
+    # back at you does not help you see that. The rule follows rather than a
+    # guessed-at ``https://{raw}`` suggestion: for the common case — a mistyped
+    # path — that suggestion would be nonsense, and a scanner that proposes a URL
+    # it invented is how this branch came to exist in the first place.
     raise ValueError(
         f"No such code path: {raw!r} (looked for {Path(raw).resolve()}). "
-        "A target is a URL, a bare hostname, or a path that exists."
+        "A target is a path that exists, or a URL with an explicit http:// or "
+        "https:// scheme."
     )
 
 

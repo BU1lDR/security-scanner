@@ -165,12 +165,41 @@ def test_url_target_is_scanned(capsys):
     assert "dast.headers.missing-hsts" in capsys.readouterr().out
 
 
-def test_bare_host_is_treated_as_url(capsys):
-    web = _yielding("dast", Requires(url=True),
-                    [_finding(rule_id="dast.headers.missing-hsts",
-                              location=Location.for_url("https://example.com/"))])
-    code = main(["example.com"], engine=_engine_with(web))
-    assert code == 1
+def test_a_bare_host_is_refused_instead_of_guessed_at(capsys):
+    """`example.com` was promoted to `https://example.com`, and the only thing
+    separating a hostname from a filename was a dot — so `app.py`, `main.sh`,
+    `requirements.txt` and `web.app` were promoted too, and `_build_target` then
+    added that stranger's host to `allowed_hosts` (D53). Asserting on the exit code
+    alone is not enough, because a scan that found nothing is also non-fatal: this
+    asserts the engine was never reached, so no packet could have left."""
+    scanned = []
+
+    class _Tripwire(Engine):
+        async def run(self, *a, **kw):            # pragma: no cover - must not run
+            scanned.append(True)
+            raise AssertionError("the engine ran against a host nobody typed a scheme for")
+
+    code = main(["example.com"], engine=_Tripwire())
+
+    assert code == 2
+    assert scanned == []
+    err = capsys.readouterr().err
+    assert "https://" in err, "the message must name the form that would work"
+
+
+def test_a_filename_shaped_like_a_host_is_not_a_website(capsys):
+    """The case that makes D53 a security fix rather than a tidy-up: `.py` is
+    Paraguay's ccTLD, so this string is a registrable domain *and* the most common
+    kind of filename. It must not become a scan target when the file is absent."""
+    scanned = []
+
+    class _Tripwire(Engine):
+        async def run(self, *a, **kw):            # pragma: no cover - must not run
+            scanned.append(True)
+            raise AssertionError("a missing file was scanned as a website")
+
+    assert main(["app.py"], engine=_Tripwire()) == 2
+    assert scanned == []
 
 
 def test_code_target_still_gets_an_http_client(tmp_path):
