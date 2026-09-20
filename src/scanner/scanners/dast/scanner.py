@@ -33,9 +33,11 @@ class DastScanner(Scanner):
 
     async def scan(self, ctx):
         if not ctx.target.has_web:
+            ctx.emit_skip("dast", "the target has no URL to observe")
             return
         cfg = ctx.config
         if cfg is not None and not cfg.get("dast.enabled", True):
+            ctx.emit_skip("dast", "switched off by config: dast.enabled = false")
             return
         url = ctx.target.url
         findings: list[Finding] = []
@@ -60,11 +62,23 @@ class DastScanner(Scanner):
     async def _tls_check(self, ctx, url: str) -> list[Finding]:
         cfg = ctx.config
         if cfg is not None and not cfg.get("dast.tls.enabled", True):
+            ctx.emit_skip(
+                "dast", "switched off by config: dast.tls.enabled = false", check="tls",
+            )
             return []
         if not url.lower().startswith("https://"):
+            ctx.emit_skip(
+                "dast", "the target is plain HTTP, so there is no certificate to read",
+                check="tls",
+            )
             return []
         if ctx.http is None:
-            return []  # no client means no gate to authorize the raw socket through
+            # No client means no gate to authorize the raw socket through.
+            ctx.emit_skip(
+                "dast", "no HTTP client was wired, so the certificate probe has no "
+                "gate to authorize through", check="tls",
+            )
+            return []
         # The probe skips the HTTP choke point, so it is handed that client's own
         # gate and authorizes through it (contract §9). Same boundary, one owner.
         result = await fetch_tls(url, ctx.http.gate)
@@ -76,5 +90,9 @@ class DastScanner(Scanner):
     async def _exposed_check(self, ctx, url: str) -> list[Finding]:
         cfg = ctx.config
         if cfg is not None and not cfg.get("dast.exposed.enabled", True):
+            ctx.emit_skip(
+                "dast", "switched off by config: dast.exposed.enabled = false",
+                check="exposed",
+            )
             return []
         return await probe_exposed_files(url, ctx.http)

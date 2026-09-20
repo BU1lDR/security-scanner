@@ -16,11 +16,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from scanner.core.context import ScanContext, ScanError
+from scanner.core.context import ScanContext, ScanError, ScanSkip
 from scanner.core.finding import Finding, Severity
 from scanner.core.registry import Registry
 from scanner.core.registry import registry as default_registry
 from scanner.core.target import Target
+
+
+def _sent(http: object) -> tuple[int, int] | None:
+    """``(total, active)`` requests the HTTP choke point has sent, or ``None``.
+
+    ``None`` means the client does not keep the counters — a test double, or no
+    client at all — and is deliberately distinct from ``(0, 0)``, which is the
+    client saying it sent nothing. Callers must not collapse the two: one is "we
+    did not observe", the other is "we observed no traffic", and this whole
+    mechanism exists because those were once the same value.
+    """
+    total = getattr(http, "requests_sent", None)
+    active = getattr(http, "active_requests_sent", None)
+    if not isinstance(total, int) or not isinstance(active, int):
+        return None
+    return total, active
 
 
 def dedupe(findings: list[Finding]) -> list[Finding]:
@@ -66,17 +82,46 @@ class ScanReport:
     #: Default empty so a hand-built ScanReport (tests, fixtures) stays valid.
     #: Renderers show the line only when the list is populated, so an empty one
     #: reads as "not recorded" rather than as "nothing ran".
+    #:
+    #: A scanner that declined outright is *not* here — it is in :attr:`skipped`
+    #: instead. This list used to be the selection verbatim, which meant a
+    #: ``dast.active.enabled = false`` in a config file produced a report saying
+    #: ``Ran: dast, dast-active`` about a scanner that returned on its first line.
     scanners_run: list[str] = field(default_factory=list)
 
-    #: The subset of :attr:`scanners_run` that sends attack-shaped traffic.
+    #: The subset of :attr:`scanners_run` that *was observed sending* attack-shaped
+    #: traffic: an active scanner appears here only if the request counters at the
+    #: choke point moved while it was running.
     #:
-    #: Recorded by the engine from ``cls.requires.active`` rather than derived
-    #: here from the name, because ``requires.active`` is the flag the gate itself
-    #: reads. Inferring it from a ``-active`` name suffix would be a second,
-    #: weaker definition of "intrusive" that a rename could silently falsify —
-    #: and this is the one field in the report where being quietly wrong is worse
-    #: than being absent.
+    #: It used to be the active subset of the selection, and that was the one field
+    #: in the report where being quietly wrong is worst. Measured: a target on a
+    #: bound-but-not-listening port exits 3 having sent no probe at all (the crawl
+    #: finds no pages, so there are no injection points and no check runs), and the
+    #: report still announced "ACTIVE CHECKS RAN. This scan sent attack-shaped
+    #: requests to the target." Selection is intent; this section is a record of
+    #: what was done, and only the choke point knows that.
+    #:
+    #: Still keyed off ``cls.requires.active`` rather than a ``-active`` name
+    #: suffix — that flag is what the gate itself reads, and a name-based guess
+    #: would be a second, weaker definition of "intrusive" a rename could falsify.
+    #: When no counting client is wired (a unit test with a fake, or no client at
+    #: all) an active scanner that ran is listed, because the fallback has to err
+    #: towards over-disclosure: claiming traffic we did not send is a nuisance,
+    #: while missing traffic we did send is the failure this field guards against.
     active_scanners_run: list[str] = field(default_factory=list)
+
+    #: Work that was selected and then declined, and why (see :class:`ScanSkip`).
+    #: Not a failure: it does not touch :meth:`exit_code`. It exists so that
+    #: "switched off" is legible in a report instead of looking like "found
+    #: nothing", which is the same conflation D42 named one level up.
+    skipped: list[ScanSkip] = field(default_factory=list)
+
+    #: Requests the choke point sent, in total and active-only. ``None`` means no
+    #: counting client was wired, which is not the same as zero (see :func:`_sent`).
+    #: These are the evidence behind :attr:`active_scanners_run`; they are reported
+    #: as well as used, because a disclosure that cannot be checked is a claim.
+    requests_sent: int | None = None
+    active_requests_sent: int | None = None
 
     @property
     def sent_active_traffic(self) -> bool:
@@ -142,16 +187,35 @@ class Engine:
         )
         collected: list[Finding] = []
         selected = self.select(target, active_enabled=active_enabled)
+        ran: list[str] = []
+        active_ran: list[str] = []
         for cls in selected:
+            before = _sent(ctx.http)
+            skips_before = len(ctx.skipped)
             scanner = cls()
             async for finding in scanner.scan(ctx):
                 collected.append(finding)
+            after = _sent(ctx.http)
+            # A whole-scanner skip (empty `check`) means it declined before doing
+            # anything, so it does not go in the "Ran:" line. A skip naming a check
+            # is one part of a scanner that did run, and belongs beside it.
+            if any(s.scanner == cls.name and not s.check for s in ctx.skipped[skips_before:]):
+                continue
+            ran.append(cls.name)
+            # Not "it was selected" but "the counters moved while it was running".
+            # Unobserved falls back to listing it, which over-discloses rather than
+            # under-discloses — see the field's own note.
+            if cls.requires.active and (
+                before is None or after is None or after[1] > before[1]
+            ):
+                active_ran.append(cls.name)
+        final = _sent(ctx.http)
         return ScanReport(
             findings=dedupe(collected),
             errors=ctx.errors,
-            # Recorded from the selection, not from what produced findings: a
-            # check that ran and found nothing still sent the requests, and that
-            # is exactly the case the disclosure exists for.
-            scanners_run=[cls.name for cls in selected],
-            active_scanners_run=[cls.name for cls in selected if cls.requires.active],
+            scanners_run=ran,
+            active_scanners_run=active_ran,
+            skipped=ctx.skipped,
+            requests_sent=final[0] if final is not None else None,
+            active_requests_sent=final[1] if final is not None else None,
         )

@@ -51,9 +51,15 @@ class DastActiveScanner(Scanner):
 
     async def scan(self, ctx):
         if not ctx.target.has_web:
+            ctx.emit_skip("dast-active", "the target has no URL to probe")
             return
         cfg = ctx.config
         if cfg is not None and not cfg.get("dast.active.enabled", False):
+            ctx.emit_skip(
+                "dast-active",
+                "switched off by config: dast.active.enabled is not set, so no "
+                "attack-shaped request was sent",
+            )
             return
 
         crawl_result = await self._safe_crawl(ctx)

@@ -42,6 +42,45 @@ def _erroring(name, requires):
     return type(name, (Scanner,), {"name": name, "requires": requires, "scan": scan})
 
 
+def _skipping(name, requires, reason="told not to", check=""):
+    async def scan(self, ctx):
+        ctx.emit_skip(name, reason, check=check)
+        return
+        yield  # pragma: no cover
+
+    return type(name, (Scanner,), {"name": name, "requires": requires, "scan": scan})
+
+
+def _sending(name, requires, count=1, *, active=True):
+    """A scanner that puts `count` requests through the client it is handed."""
+    async def scan(self, ctx):
+        for _ in range(count):
+            await ctx.http.get("https://example.com/", active=active)
+        return
+        yield  # pragma: no cover
+
+    return type(name, (Scanner,), {"name": name, "requires": requires, "scan": scan})
+
+
+class _CountingClient:
+    """The two counters the real choke point keeps, and nothing else.
+
+    Not a mock of AsyncHttpClient: the engine reads exactly these two attributes,
+    so a double that has them is the whole contract. `test_http.py` holds the
+    separate question of whether the real client increments them.
+    """
+
+    def __init__(self) -> None:
+        self.requests_sent = 0
+        self.active_requests_sent = 0
+
+    async def get(self, url, *, active=False, **kwargs):
+        self.requests_sent += 1
+        if active:
+            self.active_requests_sent += 1
+        return None
+
+
 def _engine_with(*scanner_classes) -> Engine:
     reg = Registry()
     for cls in scanner_classes:
@@ -302,3 +341,121 @@ def test_a_hand_built_report_stays_valid():
     report = ScanReport(findings=[])
     assert report.scanners_run == []
     assert report.sent_active_traffic is False
+
+
+# ── the disclosure is observed, not inferred from the selection ───────────────
+#
+# The tests above pin what the record *contains*. These pin where it comes from.
+# Built from the selection, the record answered "which scanners were asked to
+# run", and then said that in the words "this scan sent attack-shaped requests
+# to the target". Measured on a bound-but-not-listening port: exit 3, zero
+# probes, and that sentence in the report. See D58.
+
+def test_an_active_scanner_that_sent_nothing_does_not_claim_it_sent_something():
+    """The D50 wart, closed.
+
+    This scanner is selected, gated in, and runs — it simply never reaches the
+    point of sending a probe, which is what happens on every target whose crawl
+    comes back empty. The request counters are the only witness to that.
+    """
+    Act = _yielding("dast-active", Requires(url=True, active=True), [])
+    engine = _engine_with(Act)
+    client = _CountingClient()
+    report = asyncio.run(
+        engine.run(_active_target(), active_enabled=True, http=client)
+    )
+    assert report.scanners_run == ["dast-active"]      # it did run
+    assert report.active_scanners_run == []            # it sent nothing
+    assert report.sent_active_traffic is False
+    assert report.active_requests_sent == 0
+
+
+def test_an_active_scanner_that_did_send_is_disclosed():
+    """The other direction, because the test above alone is passed by a field that
+    is always empty."""
+    Act = _sending("dast-active", Requires(url=True, active=True), count=3)
+    engine = _engine_with(Act)
+    client = _CountingClient()
+    report = asyncio.run(
+        engine.run(_active_target(), active_enabled=True, http=client)
+    )
+    assert report.active_scanners_run == ["dast-active"]
+    assert report.sent_active_traffic is True
+    assert (report.requests_sent, report.active_requests_sent) == (3, 3)
+
+
+def test_passive_requests_do_not_count_as_attack_traffic():
+    """An active scanner crawls before it probes, and the crawl is passive. Counting
+    every request it made would make "sent attack-shaped traffic" true of any run
+    that got as far as fetching one page."""
+    Act = _sending("dast-active", Requires(url=True, active=True), count=4, active=False)
+    engine = _engine_with(Act)
+    client = _CountingClient()
+    report = asyncio.run(
+        engine.run(_active_target(), active_enabled=True, http=client)
+    )
+    assert report.requests_sent == 4
+    assert report.active_requests_sent == 0
+    assert report.sent_active_traffic is False
+
+
+def test_traffic_is_attributed_to_the_scanner_that_sent_it():
+    """Two active scanners, one silent. The counters are shared and cumulative, so
+    the engine has to snapshot them around each scanner rather than read a total."""
+    Quiet = _yielding("quiet-active", Requires(url=True, active=True), [])
+    Loud = _sending("loud-active", Requires(url=True, active=True), count=2)
+    engine = _engine_with(Quiet, Loud)
+    client = _CountingClient()
+    report = asyncio.run(
+        engine.run(_active_target(), active_enabled=True, http=client)
+    )
+    assert sorted(report.scanners_run) == ["loud-active", "quiet-active"]
+    assert report.active_scanners_run == ["loud-active"]
+
+
+def test_without_a_counting_client_an_active_scanner_is_still_disclosed():
+    """The fallback direction is deliberate.
+
+    With nothing counting, the engine cannot tell "sent nothing" from "unobserved",
+    and the two mistakes are not symmetric: over-disclosing is a nuisance, while
+    under-disclosing hides attack traffic that really was sent.
+    """
+    Act = _yielding("dast-active", Requires(url=True, active=True), [])
+    report = asyncio.run(_engine_with(Act).run(_active_target(), active_enabled=True))
+    assert report.active_scanners_run == ["dast-active"]
+    assert report.requests_sent is None       # not 0 — nobody was counting
+
+
+# ── declining to run is recorded, not silent ─────────────────────────────────
+
+def test_a_scanner_that_declined_is_not_listed_as_having_run():
+    Off = _skipping("dast-active", Requires(url=True, active=True),
+                    reason="dast.active.enabled = false")
+    engine = _engine_with(Off)
+    report = asyncio.run(engine.run(_active_target(), active_enabled=True))
+    assert report.scanners_run == []
+    assert report.sent_active_traffic is False
+    assert [(s.scanner, s.reason) for s in report.skipped] == [
+        ("dast-active", "dast.active.enabled = false")
+    ]
+
+
+def test_a_skipped_check_does_not_erase_the_scanner_that_ran_it():
+    """`dast` with its TLS check switched off did still run, and its header and
+    cookie findings are real. Only a whole-scanner skip (an empty check name) keeps
+    a scanner out of the Ran: line."""
+    Part = _skipping("dast", Requires(url=True), reason="no certificate", check="tls")
+    engine = _engine_with(Part)
+    report = asyncio.run(engine.run(_active_target()))
+    assert report.scanners_run == ["dast"]
+    assert report.skipped[0].check == "tls"
+
+
+def test_a_skip_is_not_an_error_and_does_not_move_the_exit_code():
+    """Otherwise every run with a tier switched off exits 3, which teaches people to
+    ignore 3 — and 3 is how an incomplete scan announces itself."""
+    Off = _skipping("dast-active", Requires(url=True, active=True), reason="off")
+    engine = _engine_with(Off)
+    report = asyncio.run(engine.run(_active_target(), active_enabled=True))
+    assert report.errors == []
+    assert report.exit_code(Severity.LOW) == 0

@@ -110,13 +110,22 @@ The report now says so, in every format:
 ```
 Security scan report
 Target: https://target/
-Ran: dast, dast-active
-ACTIVE CHECKS RAN. This scan sent attack-shaped requests (dast-active) to the target.
+Ran: dast, dast-active (57 requests)
+ACTIVE CHECKS RAN. This scan sent 42 attack-shaped requests (dast-active) to the target.
 ```
 
 That line appears whether or not the active checks found anything, and whether the
 authorization came from a flag or from this file. It did not exist until the
 config surface was documented and somebody looked — see D49 and D50.
+
+The counts are the point of the sentence, not decoration. They are what the HTTP
+choke point actually handed to the transport, so the claim can be checked against
+the target's own access log; before they existed the sentence was derived from
+which scanners had been *selected*, and it appeared on runs that sent nothing at
+all (D58). A tier you switched off says so in the same block, on its own line —
+`Skipped dast-active: switched off by config: dast.active.enabled is not set, so
+no attack-shaped request was sent` — because "switched off" and "ran and found
+nothing" are the same empty report otherwise.
 
 Two things it does not fix, which are worth knowing before you write that line:
 

@@ -61,6 +61,18 @@ class AsyncHttpClient:
             transport=transport,
             follow_redirects=False,
         )
+        # What this client actually did, for the report's disclosure section.
+        #
+        # "Sent" here means handed to the transport: counted after the gate
+        # authorized the request and after the rate limiter released it, so a
+        # refused request is never counted (it produced no traffic) and a request
+        # whose connection then failed is (we tried to reach that host, and
+        # claiming otherwise would understate what we did). The report derives its
+        # active-traffic disclosure from these counters rather than from which
+        # scanners were selected, because selection is a statement about intent and
+        # this section has to be a statement about what happened (D58).
+        self.requests_sent = 0
+        self.active_requests_sent = 0
 
     def _lane(self, request_class: RequestClass) -> tuple[TokenBucket, asyncio.Semaphore]:
         if request_class is RequestClass.EGRESS:
@@ -75,6 +87,9 @@ class AsyncHttpClient:
         limiter, semaphore = self._lane(request_class)
         await limiter.acquire()
         async with semaphore:
+            self.requests_sent += 1
+            if active:
+                self.active_requests_sent += 1
             return await self._client.request(method, url, **kwargs)
 
     async def get(self, url: str, *, active: bool = False, **kwargs) -> httpx.Response:

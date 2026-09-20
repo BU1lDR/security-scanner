@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from scanner.core.context import ScanError
+from scanner.core.context import ScanError, ScanSkip
 from scanner.core.engine import ScanReport
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.fix import Fix, FixKind
@@ -165,7 +165,79 @@ def test_json_carries_the_scan_record():
         "scanners_run": ["dast", "dast-active"],
         "active_scanners_run": ["dast-active"],
         "sent_active_traffic": True,
+        # None, not 0: this report was hand-built, so no client counted anything.
+        # A consumer must be able to tell "sent none" from "nobody was counting".
+        "requests_sent": None,
+        "active_requests_sent": None,
+        "skipped": [],
     }
+
+
+def test_json_carries_the_request_counts_when_they_were_observed():
+    report = ScanReport(
+        findings=[],
+        scanners_run=["dast", "dast-active"],
+        active_scanners_run=["dast-active"],
+        requests_sent=57,
+        active_requests_sent=42,
+    )
+    doc = json.loads(render(report, "json", target=_Target()))
+    assert doc["scan"]["requests_sent"] == 57
+    assert doc["scan"]["active_requests_sent"] == 42
+
+
+def test_json_carries_what_was_skipped_and_why():
+    report = ScanReport(
+        findings=[],
+        scanners_run=["dast"],
+        skipped=[ScanSkip("dast-active", "switched off by config", check="")],
+    )
+    doc = json.loads(render(report, "json", target=_Target()))
+    assert doc["scan"]["skipped"] == [
+        {"scanner": "dast-active", "check": "", "reason": "switched off by config"}
+    ]
+
+
+@pytest.mark.parametrize("fmt", ["terminal", "html"])
+def test_a_skipped_scanner_is_disclosed_not_omitted(fmt):
+    """"Switched off" must not read the same as "looked and found nothing".
+
+    A report that lists only what ran leaves the reader to notice an absence, and
+    the absence of a tier is exactly what they will not notice.
+    """
+    report = ScanReport(
+        findings=[],
+        scanners_run=["dast"],
+        skipped=[ScanSkip("dast-active", "dast.active.enabled = false")],
+    )
+    out = render(report, fmt, target=_Target())
+    assert "Skipped dast-active" in out
+    assert "dast.active.enabled = false" in out
+
+
+def test_a_skipped_check_is_named_with_its_scanner():
+    report = ScanReport(
+        findings=[],
+        scanners_run=["dast"],
+        skipped=[ScanSkip("dast", "the target is plain HTTP", check="tls")],
+    )
+    out = render(report, "terminal", target=_Target())
+    assert "Skipped dast/tls: the target is plain HTTP" in out
+
+
+def test_a_report_of_nothing_but_skips_still_discloses_them():
+    """The one case that would otherwise render as a blank clean report: every
+    scanner declined, so `scanners_run` is empty and there is nothing to say
+    except the reason nothing happened."""
+    report = ScanReport(
+        findings=[], skipped=[ScanSkip("dast", "no URL to observe")],
+    )
+    out = render(report, "terminal", target=_Target())
+    assert "Skipped dast: no URL to observe" in out
+    assert "Ran:" not in out
+    doc = json.loads(render(report, "json", target=_Target()))
+    assert doc["scan"]["scanners_run"] == []
+    assert doc["scan"]["skipped"][0]["scanner"] == "dast"
 
 
 def test_json_scan_record_is_false_for_a_passive_scan():

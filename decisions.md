@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-20
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 448 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 466 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1073,6 +1073,79 @@ paragraph most likely to be reasoned instead of run, because nothing anywhere fo
 execute. So it was executed, and two of its sentences did not survive. Both corrections came
 from a pass over the committed artifact by someone who had not written it, which is the only
 kind of pass that could have found them.
+
+---
+
+### D58 — The report said it sent attack traffic because it had intended to
+[D49] added the disclosure section — `Ran:`, and for the intrusive tier the sentence "ACTIVE
+CHECKS RAN. This scan sent attack-shaped requests to the target." — on the argument that a
+report is the artifact you keep to show what you did to a host. [D50] recorded the flaw in it
+and left it: every field was built from the engine's *selection*, so the section answered
+"which scanners were asked to run" while being phrased as a statement about what happened.
+[D57] pinned that in the rehearsal gate as assertion D5, a check that the report was wrong,
+so the wart could not drift without somebody noticing.
+
+**The run that makes it concrete is D57's own phase D.** A socket bound and never listened
+on: the passive tier's first GET fails, the crawl finds no page, so there is no injection
+point, no check runs, and not one attack-shaped byte is sent. The report exits 3, carries one
+error, lists no findings — and says it sent attack-shaped requests to the target. Every other
+assertion in that gate reads the fake server's request log precisely because the report could
+not witness traffic; this was the one field where the report's own claim was checked against
+the wire and found to contradict it.
+
+**The second instance is quieter and more likely.** `dast.active.enabled = false` in a config
+file makes the scanner return on its first line, and the report then said `Ran: dast,
+dast-active`. Same for `dast.enabled`, and for the TLS and exposed-file sub-checks. A reader
+handed that report sees a tier named as having run, no findings under it, and has no way to
+tell that from a tier that ran and found the host clean — which is [D42]'s conflation, one
+level up from the findings it was written about.
+
+**Both are fixed by counting instead of asking.** `AsyncHttpClient` keeps two integers,
+`requests_sent` and `active_requests_sent`, incremented inside the choke point after the gate
+authorizes and after the rate limiter releases, immediately before the transport is handed
+the request. A refused request is therefore never counted, which matters: the phase B run
+with authorization withheld must report zero, and it does. A request whose connection then
+fails *is* counted, which is the deliberate direction — from inside this client there is no
+way to know how far it got, and "sent nothing" would understate what was done to the host.
+The engine snapshots the pair around each scanner rather than reading a total, because the
+counters are cumulative and shared, and attribution is the whole point: two active scanners
+where only one probed must produce one name, not two.
+
+**`active_scanners_run` is now an observation, with one deliberate fallback.** When no
+counting client is wired — a unit test with a fake, an in-process caller passing nothing — an
+active scanner that ran is still listed. The two possible mistakes are not symmetric:
+over-disclosing is a nuisance, under-disclosing hides attack traffic that really was sent.
+`requests_sent` is `None` in that case rather than `0`, because "nobody was counting" and "we
+counted none" are different facts and this is the one field in the report where a reassuring
+default would be actively harmful. The counts are reported as well as used, so the claim can
+be checked against the target's own access log instead of taken on trust.
+
+**Declining to run needed a channel of its own.** `ScanSkip(scanner, reason, check)` sits
+beside `ScanError` and is emitted by every early return that used to be a bare `return`. It
+does not touch the exit code, and that restraint is the design: fold "switched off" into
+`errors` and every run with a tier disabled exits 3, which teaches people to ignore 3 — and 3
+is how an incomplete scan announces itself. An empty `check` means the whole scanner
+declined, and only then is it kept out of `Ran:`; a named check means a scanner that did run
+with one part switched off, and `dast` with its TLS check disabled did still check headers
+and cookies. All three formats print the reason.
+
+**What this does not claim.** The counters measure requests handed to the transport, not
+bytes acknowledged by the target; they are a truthful account of what this process tried to
+do, which is the question a disclosure has to answer, and they are not a packet capture.
+Phase D's assertion is inverted rather than deleted — the report is now held to the same
+zero the server's log shows — and phase E gained the config-disabled run read back from the
+report, with the enabled run pinned to exactly three active requests so a report that always
+says "skipped" cannot pass. 42 assertions to 44, and the suite from 448 to 466.
+
+**Why:** The section exists to answer one question, and it was built from the only data that
+cannot answer it. Selection is intent; a disclosure is a record. The distance between the two
+is every way a scan can be asked to do something and not do it — refused by the gate,
+switched off in a file, starved of injection points by a crawl that found nothing, stopped by
+a host that never answered — and each of those is a case where the previous implementation
+said, in as many words, that attack traffic went out. That it survived [D50]'s own paragraph
+describing it, and then a gate assertion written to hold it in place, is the part worth
+keeping in view: writing the defect down is not the same as the defect being cheap to live
+with, and "known" quietly becomes "intended" if nothing forces the question again.
 
 ---
 

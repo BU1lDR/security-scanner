@@ -68,14 +68,28 @@ def _what_ran(report: ScanReport) -> list[str]:
     top of the terminal output rather than the bottom: the point is that it is seen
     without being looked for.
     """
-    if not report.scanners_run:
+    if not report.scanners_run and not report.skipped:
         return []          # hand-built report (a fixture, an older caller)
-    lines = [f"Ran: {', '.join(report.scanners_run)}"]
+    lines: list[str] = []
+    if report.scanners_run:
+        ran = f"Ran: {', '.join(report.scanners_run)}"
+        if report.requests_sent is not None:
+            ran += f" ({report.requests_sent} requests)"
+        lines.append(ran)
     if report.sent_active_traffic:
+        sent = report.active_requests_sent
+        count = f"{sent} " if sent is not None else ""
         lines.append(
-            "ACTIVE CHECKS RAN. This scan sent attack-shaped requests "
+            f"ACTIVE CHECKS RAN. This scan sent {count}attack-shaped requests "
             f"({', '.join(report.active_scanners_run)}) to the target."
         )
+    # Printed in the same block as what ran, not tucked in with the errors: a tier
+    # that was switched off is the most likely reason a report is emptier than the
+    # reader expects, and the whole point of this section is that it is seen
+    # without being looked for.
+    for skip in report.skipped:
+        where = f"{skip.scanner}/{skip.check}" if skip.check else skip.scanner
+        lines.append(f"Skipped {where}: {skip.reason}")
     return lines
 
 
@@ -191,11 +205,17 @@ def _render_json(report: ScanReport, target) -> str:
     # a consumer gating a pipeline on this key should get a missing key it has to
     # handle rather than a reassuring default it will not question. The terminal
     # and HTML renderers print nothing in the same case, for the same reason.
-    if report.scanners_run:
+    if report.scanners_run or report.skipped:
         doc["scan"] = {
             "scanners_run": list(report.scanners_run),
             "active_scanners_run": list(report.active_scanners_run),
             "sent_active_traffic": report.sent_active_traffic,
+            "requests_sent": report.requests_sent,
+            "active_requests_sent": report.active_requests_sent,
+            "skipped": [
+                {"scanner": s.scanner, "check": s.check, "reason": s.reason}
+                for s in report.skipped
+            ],
         }
 
     return _json.dumps(doc, indent=2)

@@ -144,6 +144,84 @@ def test_post_uses_the_post_method():
     asyncio.run(body())
 
 
+# ── the counters behind the report's disclosure ───────────────────────────────
+#
+# The report says whether this scan sent attack-shaped traffic, and since D58 it
+# says it from these two integers rather than from which scanners were selected.
+# That makes them safety-critical in the same way the gate is: an undercount here
+# is a report claiming a scan was passive when it was not.
+
+def test_the_client_counts_what_it_sends():
+    async def body():
+        t = RecordingTransport()
+        client = _client(t)
+        assert (client.requests_sent, client.active_requests_sent) == (0, 0)
+        await client.get("https://example.com/a")
+        await client.get("https://example.com/b")
+        assert client.requests_sent == 2
+        assert client.active_requests_sent == 0
+        await client.aclose()
+
+    asyncio.run(body())
+
+
+def test_active_requests_are_counted_separately_and_in_both_totals():
+    async def body():
+        scope = Scope(
+            allowed_hosts={"example.com"},
+            active_allowlist={"example.com"},
+            authorized_ack=True,
+        )
+        t = RecordingTransport()
+        client = _client(t, scope=scope)
+        await client.get("https://example.com/", active=False)
+        await client.get("https://example.com/", active=True)
+        await client.post("https://example.com/", active=True, data={"a": "b"})
+        assert client.requests_sent == 3
+        assert client.active_requests_sent == 2
+        await client.aclose()
+
+    asyncio.run(body())
+
+
+def test_a_refused_request_is_not_counted_as_sent():
+    """The gate raises before any I/O, so nothing reached the host and the count
+    must agree. If a refusal counted, a run with authorization left off would
+    report that it sent attack traffic — the exact false claim these counters were
+    added to prevent."""
+    async def body():
+        t = RecordingTransport()
+        client = _client(t)                     # in scope, not active-authorized
+        with pytest.raises(OutOfScopeError):
+            await client.get("https://example.com/", active=True)
+        with pytest.raises(OutOfScopeError):
+            await client.get("https://evil.com/")
+        assert t.requests == []
+        assert (client.requests_sent, client.active_requests_sent) == (0, 0)
+        await client.aclose()
+
+    asyncio.run(body())
+
+
+def test_a_request_whose_connection_fails_still_counts_as_sent():
+    """The other direction, and the less obvious one. We authorized it, we handed it
+    to the transport, and we cannot know from here how far it got. Reporting that as
+    "sent nothing" would understate what was done to the host, so the count errs the
+    other way."""
+    class FailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ConnectError("all connection attempts failed")
+
+    async def body():
+        client = _client(FailingTransport())
+        with pytest.raises(httpx.ConnectError):
+            await client.get("https://example.com/")
+        assert client.requests_sent == 1
+        await client.aclose()
+
+    asyncio.run(body())
+
+
 def test_async_context_manager_closes_the_client():
     async def body():
         t = RecordingTransport()

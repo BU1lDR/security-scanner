@@ -628,6 +628,13 @@ REDIRECT_ROUTES = {"/go", "/go-fixed", "/go-200"}
 #: Phase A's rate, repeated here because the floor is arithmetic from it.
 PHASE_A_RPS = 8.0
 
+#: Phase E's enabled run, counted the same way: ``/guard`` links to one page with
+#: one parameter, so 1 injection point x (1 XSS + 2 SQLi) = 3 active requests. The
+#: open-redirect check sends nothing -- ``q`` does not hint at a URL and ``hello``
+#: does not look like one. The two crawl GETs are passive and are not counted, which
+#: is the distinction this number exists to hold the report to.
+EXPECTED_GUARD_ACTIVE_REQUESTS = 3
+
 
 def decoded(record: dict) -> str:
     return unquote(record["path"]) + " " + unquote(record["body"])
@@ -1055,13 +1062,19 @@ def phase_d(checks: Checks, config_path: Path) -> None:
         not wire, "and reached neither rehearsal site",
         *[f"{r['method']} {r['path'][:80]}" for r in wire[:5]],
     )
-    # D5: the known wart, pinned rather than argued about. sent_active_traffic
-    # is derived from selection, so the report is a third thing that cannot
-    # witness traffic -- which is why every other assertion here reads the
-    # server's log instead (D50).
+    # D5: what used to be D50's wart, now the assertion that closed it. This run
+    # is the case that exposed it: the crawl never connects, so no injection point
+    # exists, no check runs, and nothing attack-shaped is sent -- and the report
+    # said "ACTIVE CHECKS RAN. This scan sent attack-shaped requests to the
+    # target." because the claim was derived from which scanners were selected.
+    # It is derived from the choke point's own counters now (D58), so this phase
+    # is the one place where the report can be held to the same standard as the
+    # server's log: both must say zero.
     checks.expect(
-        scan.get("sent_active_traffic") is True,
-        "the report still claims active traffic it never sent (D50)",
+        scan.get("sent_active_traffic") is False
+        and scan.get("active_requests_sent") == 0
+        and "dast-active" not in (scan.get("active_scanners_run") or []),
+        "and does not claim active traffic it never sent",
         f"scan block was {scan!r}",
     )
 
@@ -1134,6 +1147,30 @@ def phase_e(checks: Checks, port: int) -> None:
     checks.expect(
         not off_wire, "dast.active.enabled=false sent no probe",
         *[f"{r['method']} {r['path'][:80]}" for r in off_wire[:5]],
+    )
+    # E3: and says so. E2 is a statement about the wire; this is the same run read
+    # from the artifact a person keeps, which for a scanner switched off in a config
+    # file was previously indistinguishable from one that ran and found the target
+    # clean -- `Ran: dast-active`, no findings, exit 0 (D58).
+    off_skips = [(s.scanner, s.check) for s in off_report.skipped]
+    checks.expect(
+        ("dast-active", "") in off_skips
+        and "dast-active" not in off_report.scanners_run
+        and off_report.active_requests_sent == 0,
+        "and the report discloses that it was switched off",
+        f"skipped={off_skips!r}, scanners_run={off_report.scanners_run!r}",
+    )
+    # E4: the positive control again, from the same two fields, so E3 cannot be
+    # passed by a report that always says "skipped". Both runs disable the passive
+    # tier, so ("dast", "") is expected in both and is not what E3 is about.
+    on_skips = [(s.scanner, s.check) for s in on_report.skipped]
+    checks.expect(
+        ("dast-active", "") not in on_skips
+        and on_report.active_requests_sent == EXPECTED_GUARD_ACTIVE_REQUESTS,
+        f"while the enabled run reports no skip and "
+        f"{EXPECTED_GUARD_ACTIVE_REQUESTS} active requests",
+        f"skipped={on_skips!r}, "
+        f"active_requests_sent={on_report.active_requests_sent!r}",
     )
 
 
