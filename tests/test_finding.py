@@ -2,10 +2,14 @@ import pytest
 
 from scanner.core.finding import (
     EVIDENCE_MAX_LEN,
+    FRAGMENT_MAX_LEN,
+    REMEDIATION_MAX_LEN,
+    TITLE_MAX_LEN,
     _TRUNCATION_MARKER,
     Confidence,
     Finding,
     Severity,
+    bounded,
 )
 from scanner.core.fix import Fix, FixKind
 from scanner.core.location import Location
@@ -214,3 +218,52 @@ def test_already_redacted_evidence_passes_through_unchanged():
     mask — evidence would decay a little at every layer it crossed."""
     already = "Hardcoded GitHub token: ghp_" + "*" * 36 + " (value redacted, line 12)"
     assert _minimal_finding(evidence=already).evidence == already
+
+
+# --- the other three fields a finding carries into a report (D52) ------------
+
+def test_over_long_title_is_capped_and_says_so():
+    """D44 measured a 4036-character title from a 4000-character cookie name and
+    recorded that the field was untouched. The cap is the backstop half of the
+    answer; the fragment bound at the interpolation is the other half."""
+    f = _minimal_finding(title="t" * 5000)
+
+    assert len(f.title) == TITLE_MAX_LEN
+    assert f.title.endswith(_TRUNCATION_MARKER)
+
+
+def test_over_long_remediation_is_capped_and_says_so():
+    f = _minimal_finding(remediation="r" * 5000)
+
+    assert len(f.remediation) == REMEDIATION_MAX_LEN
+    assert f.remediation.endswith(_TRUNCATION_MARKER)
+
+
+def test_a_credential_in_a_title_or_remediation_is_scrubbed():
+    """``title`` and ``remediation`` reach the report and the AI prompt on exactly
+    the same terms as ``evidence``, so the scrub cannot stop at one of them."""
+    token = "ghp_" + "a" * 36
+    f = _minimal_finding(title=f"Token {token} in source", remediation=f"Rotate {token}.")
+
+    assert token not in f.title
+    assert token not in f.remediation
+
+
+def test_a_bounded_fragment_is_short_enough_to_leave_room_for_our_own_prose():
+    """The fragment bound exists so a hostile name cannot consume a whole field:
+    bounded fragment + the longest sentence any check wraps it in must still fit.
+
+    ``FRAGMENT_MAX_LEN < TITLE_MAX_LEN`` is *not* that property — it permits a
+    fragment that fits with nothing left over for the sentence around it. With the
+    loose version, any FRAGMENT_MAX_LEN in 158..199 (or any TITLE_MAX_LEN under
+    163) left the whole suite green while every hostile-name cookie title became
+    padding plus a truncation marker, saying nothing about what was found. The
+    wrapper is measured from the longest title any check builds rather than
+    hardcoded, so editing that sentence re-checks the bound instead of silently
+    eating the slack.
+    """
+    longest_title = "Cookie '{}' is missing the SameSite attribute"  # dast/cookies.py
+    wrapper = len(longest_title.format(""))
+
+    assert len(bounded("x" * 5000, FRAGMENT_MAX_LEN)) == FRAGMENT_MAX_LEN
+    assert FRAGMENT_MAX_LEN + wrapper <= TITLE_MAX_LEN

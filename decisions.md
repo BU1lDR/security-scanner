@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-19
-**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 398 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.2.0 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 405 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -489,6 +489,111 @@ that library and nothing else. Three tiers of defence existed here — a broad
 exception handler, a unit suite, and a live wire capture — and all three were
 satisfied by code that did nothing, because each of them was built from the same
 misunderstanding as the code it was guarding.
+
+### D52 — The bound belongs where the target's text arrives, not where it leaves
+
+[D44] ended by naming the shape this change adopts, and by measuring what it had left
+undone: on a hostile 4000-character cookie name, `evidence` came back at 500 characters
+and `title` at 4036, `remediation` at 4071, and the AI prompt built from that finding at
+12,900. It called its own fix "a default, not an invariant". The remaining defect was not
+that three fields lacked a cap. It was *where* the cap was.
+
+**A field cap is the wrong unit.** `EVIDENCE_MAX_LEN` bounds a field to a number chosen
+for the length of *our own* prose. A target-chosen fragment interpolated into that field
+consumes the whole allowance, and it does so once per field, so three findings about one
+cookie carried that same 4000-character name six times over between their titles and
+remediations. Capping `title` and `remediation` as well would have brought 12,900 down to
+something survivable while leaving the actual mechanism — one fragment, unbounded,
+multiplied by every field and every finding it appears in — completely intact.
+
+So the bound moved to the interpolation. `core/finding.py` exposes one helper,
+`bounded(text, max_len)` — the old private `_bounded_evidence`, renamed because it is now
+the thing call sites are meant to reach for. `dast/cookies.py` calls it once, at the top
+of the loop, before the name reaches any of its four uses; `dast_active/checks.py` routes
+every written use of the parameter name through one `_name(point)` helper. Measured on the
+same 4000-character cookie name: title 156, remediation 191, evidence 179,
+`location.param` 120, prompt 937.
+
+`checks.py` needed a helper rather than `cookies.py`'s rebind because `point` is also what
+the request uses, and the name there must stay verbatim. The first version of this change
+bounded it only where it entered `Location`, which left the three `evidence` sentences on
+the `EVIDENCE_MAX_LEN` cap — the wrong unit, exactly as argued above: a 4000-character name
+consumed the whole budget and truncated away the clause that said what had been found, so
+the finding kept its `rule_id` and severity but lost the `{family}` attribution, the XSS
+marker and the redirect status. Short is not the same as informative, and a field cap can
+only deliver the first. The test now asserts the sentence survives, not just that the
+string is short — `len(x) <= CAP` is satisfied by truncation, which is how this got through
+the first time.
+
+**The probe still goes out under the real name.** `checks.py` bounds the parameter name in
+the *report* only. A truncated parameter name is a different parameter, and the request
+has to test the one the target actually published, so the bound is applied where the
+`Finding` is built and nowhere near `_send`. A test asserts both halves — that the
+transport saw the full name, and that the finding carries the short one — because they are
+easy to conflate, and the wrong fix here silently stops testing the parameter while still
+reporting on it.
+
+**The field cap stays, and is not the fix.** `__post_init__` now runs `bounded` over
+`title` and `remediation` as well as `evidence`. Its job is to catch the call site that
+forgets, mirroring `Fix.__post_init__` enforcing `apply_safe` rather than trusting callers
+to remember it. The division of labour is worth stating plainly, because collapsing it is
+the easy mistake: the fragment bound removes the amplification, and the field cap limits
+the damage when someone skips the helper. Neither substitutes for the other, and the field
+cap cannot reach `location` at all.
+
+**Why `location` can only be defended upstream.** Contract §8 keys the dedup fingerprint
+on `location`'s values. A cap applied in `__post_init__` would change a finding's
+*identity* rather than its prose, and would do it inconsistently — the fingerprint would
+depend on whether a given code path happened to hand over a long value. Bounding the
+fragment before `Location` is constructed keeps the fingerprint a pure function of what
+the finding actually carries. The cost is real and is accepted: two parameter names
+differing only after character 120 now share a fingerprint and dedup into a single
+finding. A name that long was not typed by anyone.
+
+**A docstring whose conclusion outran its premise.** `ai/advisor.py`'s `build_prompt` said
+`evidence` "is already redacted and truncated at construction (contract §4), so no secret
+or raw payload can reach the model here." The premise was true and the conclusion was not:
+the prompt interpolates `title` and `remediation` on exactly equal terms, and neither was
+scrubbed. It is true now, and it says why it is true rather than resting on the one field
+that happened to be guarded.
+
+**What this does not do — measured, not estimated.**
+
+- **`location.url` is unbounded.** Moving the same 4000-character string from the cookie
+  name to the URL path gives `location.url` 4020 characters and a 4469-character prompt.
+  Crawled URLs come out of the target's own HTML, so this is reachable rather than
+  theoretical. It does not belong in `bounded`: truncating a URL destroys the one field a
+  reader uses to reproduce the finding. It belongs at the crawler's enqueue, because a URL
+  that long is not one worth fetching — which makes it a scope decision rather than a
+  formatting one.
+- **`Fix.description` is a fifth string field.** [D44] counted four. `sca/scanner.py`
+  interpolates a dependency's name and version into a `Fix` description from a manifest in
+  the scanned tree, uncapped, and it reaches the terminal and JSON reports. It does not
+  reach the model: `build_prompt` reads eight named fields and `fix` is not among them.
+- **`Finding` is still not frozen,** and the advisor still assigns to a finding after it is
+  built. Anything written after `__post_init__` bypasses both the cap and the helper. The
+  only part of this change that is structurally an invariant is that there is now exactly
+  one helper to call — and that holds for as long as call sites call it, which is the same
+  conditional [D44] was honest about.
+- **[D44]'s count of exposed sites was too high.** It named the passive cookie, header and
+  TLS checks as the three that truncated nothing. That is true of all three and
+  load-bearing for one. `dast/headers.py` reports *missing* headers, so every string in it
+  is a literal and there is no target text to bound. `dast/tls.py` interpolates parsed
+  certificate `datetime`s and the negotiated protocol name, and the latter only inside
+  `if protocol in _WEAK_PROTOCOLS` — a closed set of library constants; the certificate's
+  subject is compared against its issuer and never printed. Only the cookie check ever
+  carried a target-chosen string of unbounded length. This matters because that count is
+  what a reader would use to judge whether this change is finished, and "one of three" is
+  a different claim from "three of three".
+
+**Why:** The lesson [D44] drew was that an invariant belongs in the type that owns it.
+That is right, and it is not sufficient, because a type owns a *field* and the untrusted
+thing is a *fragment*. A cap at the field is measured against the wrong quantity — the
+length our own sentences happen to be — so it converts an unbounded input into a bounded
+one only in the sense that a bucket converts a flood. Bounding at the interpolation puts
+the check on the same line as the decision to trust, which is the only place the answer is
+obvious: whoever writes `f"Cookie '{name}'"` knows `name` came from the target. Whoever
+reads `Finding(...)` eight call sites later does not.
 
 ---
 

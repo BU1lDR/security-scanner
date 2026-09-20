@@ -9,7 +9,7 @@ with the cookie name in the finding's location so a report points precisely.
 
 from __future__ import annotations
 
-from scanner.core.finding import Confidence, Finding, Severity
+from scanner.core.finding import FRAGMENT_MAX_LEN, Confidence, Finding, Severity, bounded
 from scanner.core.location import Location
 
 _OWASP_COOKIES = "https://owasp.org/www-community/controls/SecureCookieAttribute"
@@ -53,6 +53,11 @@ def check_cookies(url: str, set_cookie_values: list[str]) -> list[Finding]:
         name, attrs = _parse_cookie(raw)
         if not name:
             continue
+        # The target chose this name. Bound it once, here, where it enters our
+        # prose: every use below — title, remediation, evidence and
+        # location.param — is downstream of this line, and location cannot be
+        # bounded at the field because the fingerprint keys on it (D52).
+        name = bounded(name, FRAGMENT_MAX_LEN)
 
         if is_https and "secure" not in attrs:
             findings.append(_finding(

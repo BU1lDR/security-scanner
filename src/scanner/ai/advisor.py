@@ -42,9 +42,15 @@ SYSTEM_PROMPT = (
 
 
 def build_prompt(finding: Finding) -> str:
-    """Assemble the user message from a finding's own fields only. ``evidence`` is
-    already redacted and truncated at construction (contract §4), so no secret or
-    raw payload can reach the model here."""
+    """Assemble the user message from a finding's own fields only.
+
+    Every prose field interpolated below is scrubbed and capped at construction —
+    ``title`` and ``remediation`` on the same terms as ``evidence`` (contract §4,
+    D52). This docstring used to justify "no secret can reach the model here" from
+    ``evidence`` alone, which was a claim about three fields resting on a premise
+    about one: the other two were unscrubbed the whole time. ``location`` is bounded
+    by its callers instead, at the interpolation, because the fingerprint keys on it.
+    """
     refs = ", ".join(finding.references) if finding.references else "none"
     return (
         f"Finding rule id: {finding.rule_id}\n"

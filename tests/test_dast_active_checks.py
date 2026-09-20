@@ -5,7 +5,7 @@ from urllib.parse import parse_qsl
 import httpx
 
 from scanner.core.egress import Egress
-from scanner.core.finding import Confidence, Severity
+from scanner.core.finding import FRAGMENT_MAX_LEN, Confidence, Severity
 from scanner.core.gate import RequestGate
 from scanner.core.http import AsyncHttpClient
 from scanner.core.rule_id import is_valid
@@ -274,3 +274,29 @@ def test_body_probe_keeps_duplicate_field_names():
     # Both fields survive. dict(params) would have collapsed a checkbox group to
     # a single pair and quietly changed the request being tested.
     assert len(parse_qsl(seen[0], keep_blank_values=True)) == 2
+
+
+def test_a_hostile_parameter_name_is_bounded_in_the_location():
+    """The parameter name is the target's: the crawler read it out of the target's
+    own HTML. The *request* must use it verbatim — a truncated name is a different
+    parameter — but nothing downstream of ``Location`` caps what the report and the
+    AI prompt carry, so the bound belongs here (D52)."""
+    hostile = "p" * 4000
+    sent = []
+
+    class _Echo:
+        async def get(self, url, *, active=False, params=None, **kwargs):
+            sent.append(dict(params or []))
+            return _Resp(f"<html><body>{dict(params or []).get(hostile, '')}</body></html>")
+
+    findings = _run(check_xss_reflected(_point(param=hostile), _Echo()))
+
+    assert len(findings) == 1
+    assert hostile in sent[0], "the probe must be sent under the real parameter name"
+    assert len(findings[0].location.param) <= FRAGMENT_MAX_LEN
+
+    # Not just the location. The evidence interpolates the name too, and bounding
+    # only at Location left that to the EVIDENCE_MAX_LEN cap — which the name then
+    # consumed whole, truncating away the clause that says what was found. The
+    # sentence after the name must survive.
+    assert "reflected into the response" in findings[0].evidence

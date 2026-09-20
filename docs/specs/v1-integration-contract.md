@@ -133,7 +133,8 @@ class Finding:
     confidence: Confidence
     location: Location
     evidence: str           # human-readable, ALREADY redacted by the caller;
-                            # __post_init__ also scrubs + caps it (§4)
+                            # __post_init__ also scrubs + caps it, and title +
+                            # remediation, at their own limits (§4)
     remediation: str
     scanner: str            # id of the emitting scanner (§6): sca|dast|dast-active|sast
     references: list[str] = []      # "CWE-79", "CVE-2024-...", OWASP ids, URLs
@@ -155,6 +156,15 @@ Decisions baked in here (resolving the three-way schism):
   `Finding.__post_init__` scrubs recognisable credentials and caps the string at
   `EVIDENCE_MAX_LEN` (500), because "every caller remembers" turned out to be false
   in practice — see decisions.md D44.
+- **Target-derived text is bounded at the interpolation**, by the one helper
+  `scanner.core.finding.bounded`, before it reaches *any* of a `Finding`'s four
+  string-bearing fields — `title`, `evidence`, `remediation`, `location`. (A fifth
+  string reaches reports through the nested `fix.description`, which no cap covers;
+  D52 records that limit.) `__post_init__` additionally caps `title`
+  (`TITLE_MAX_LEN`, 200) and `remediation` (`REMEDIATION_MAX_LEN`, 600) as a
+  backstop, but `location` is deliberately **not** capped at the field: §8 keys the
+  dedup fingerprint on its values, so a cap there would change a finding's identity
+  rather than only its prose — see decisions.md D52.
 - **`references` is `list[str]`**, not a structured `Reference` type. Plain
   identifier strings are enough for v1. (Matches the built code; the structured
   Reference type from the core prose is dropped.)

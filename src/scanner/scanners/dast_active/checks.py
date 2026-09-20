@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlencode, urlsplit
 
-from scanner.core.finding import Confidence, Finding, Severity
+from scanner.core.finding import FRAGMENT_MAX_LEN, Confidence, Finding, Severity, bounded
 from scanner.core.location import Location
 
 _WSTG = "https://owasp.org/www-project-web-security-testing-guide/"
@@ -163,6 +163,20 @@ def _header(resp, name: str) -> str:
     return (getter(name) or "") if callable(getter) else ""
 
 
+def _name(point) -> str:
+    """The target's parameter name, bounded for anything we *write*.
+
+    The request uses ``point.param`` verbatim; every string that ends up in a
+    report goes through here instead. This exists as a function because the
+    evidence sentences are built by the callers below, before :func:`_finding`
+    ever sees them — bounding only at ``Location`` left those relying on the
+    ``EVIDENCE_MAX_LEN`` field cap, and a 4000-character name then consumed the
+    whole budget and truncated away the clause that said what was wrong. Bounding
+    the fragment is the right unit; the field cap is the backstop (D52).
+    """
+    return bounded(point.param, FRAGMENT_MAX_LEN) if point.param else point.param
+
+
 def _finding(rule_id: str, title: str, severity: Severity, point, evidence: str,
              remediation: str, references: list[str]) -> Finding:
     return Finding(
@@ -170,7 +184,13 @@ def _finding(rule_id: str, title: str, severity: Severity, point, evidence: str,
         title=title,
         severity=severity,
         confidence=Confidence.FIRM,
-        location=Location.for_url(point.url, method=point.method, param=point.param),
+        # The parameter name came from the target's own HTML. The request used it
+        # verbatim; the *report* gets it bounded, because nothing downstream of
+        # Location caps it — the fingerprint keys on location, so it cannot be
+        # capped at the field (D52).
+        location=Location.for_url(
+            point.url, method=point.method, param=_name(point),
+        ),
         evidence=evidence,  # Finding caps and scrubs it (EVIDENCE_MAX_LEN)
         remediation=remediation,
         scanner="dast-active",
@@ -188,7 +208,7 @@ async def check_xss_reflected(point, http) -> list[Finding]:
             "dast.active.xss-reflected",
             "Reflected cross-site scripting (unescaped input)",
             Severity.HIGH, point,
-            f"The '{point.param}' parameter was reflected into the response "
+            f"The '{_name(point)}' parameter was reflected into the response "
             f"unescaped (our marker came back as {_XSS_SIGNATURE}), so HTML/script "
             "metacharacters are not being encoded.",
             "Context-sensitively encode all user input on output (HTML-escape by "
@@ -211,7 +231,7 @@ async def check_sqli_error(point, http) -> list[Finding]:
             "dast.active.sqli-error",
             "SQL injection (database error triggered)",
             Severity.HIGH, point,
-            f"Appending a single quote to '{point.param}' produced a {family} "
+            f"Appending a single quote to '{_name(point)}' produced a {family} "
             "database error that the untampered request did not, indicating the "
             "value reaches an SQL query unsanitized.",
             "Use parameterized queries / prepared statements; never build SQL by "
@@ -242,7 +262,7 @@ async def check_open_redirect(point, http) -> list[Finding]:
             "dast.active.open-redirect",
             "Open redirect (attacker-controlled redirect target)",
             Severity.MEDIUM, point,
-            f"Setting '{point.param}' to an external URL caused a {status} redirect "
+            f"Setting '{_name(point)}' to an external URL caused a {status} redirect "
             f"to that host ({_REDIRECT_SENTINEL_HOST}), so the redirect target is "
             "user-controlled.",
             "Do not redirect to raw user input. Allowlist permitted targets or use "

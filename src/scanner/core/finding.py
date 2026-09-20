@@ -23,21 +23,42 @@ from scanner.core.rule_id import validate as _validate_rule_id
 #: the three passive DAST checks that truncated nowhere.
 EVIDENCE_MAX_LEN = 500
 
+#: Ceiling on one piece of *target-derived* text at the point it is interpolated
+#: into a finding's prose — a cookie name, a parameter name. 120 is the cap the
+#: one call site that already bounded such a fragment chose (``sca/scanner.py``'s
+#: title cap), which is the same reasoning that picked ``EVIDENCE_MAX_LEN``.
+FRAGMENT_MAX_LEN = 120
+
+#: Field-level backstops for the other two prose fields, mirroring what
+#: ``EVIDENCE_MAX_LEN`` does for ``evidence``. Headroom over the longest text any
+#: scanner writes today: 55 for a static title, 120 for SCA's capped OSV summary,
+#: 235 for the longest coverage remediation.
+TITLE_MAX_LEN = 200
+REMEDIATION_MAX_LEN = 600
+
 #: Truncation is visible on purpose. A silently shortened string reads like
 #: complete evidence, which is how someone concludes a scan found less than it did.
 _TRUNCATION_MARKER = "... (truncated)"
 
 
-def _bounded_evidence(evidence: str) -> str:
-    """Scrub then truncate — the two halves of the ``evidence`` contract.
+def bounded(text: str, max_len: int = EVIDENCE_MAX_LEN) -> str:
+    """Scrub then truncate — the one bounded helper target-derived text goes through.
 
-    **Why here and not at the call sites.** The contract used to be documented on
-    the field and enforced nowhere, so eight call sites each answered it
-    independently and gave four different answers. One of them was wrong in a way
-    that leaked target data into reports and into ``--ai`` request bodies. Putting
-    it in ``__post_init__`` mirrors :class:`~scanner.core.fix.Fix`, which enforces
-    its ``apply_safe`` invariant in the dataclass rather than trusting callers, and
-    means a check added later cannot reintroduce the same defect by omission.
+    Call it at the **interpolation**, on the untrusted fragment, before that
+    fragment reaches any of a :class:`Finding`'s four string-bearing fields —
+    ``title``, ``evidence``, ``remediation``, ``location`` (D44/D52). Of those,
+    ``location`` can *only* be defended here: contract §8 keys the dedup
+    fingerprint on its values, so a cap applied at the field would change a
+    finding's identity rather than only its prose.
+
+    **Why a helper *and* a field-level cap.** ``__post_init__`` calls this on
+    ``evidence``, ``title`` and ``remediation``, which mirrors
+    :class:`~scanner.core.fix.Fix` enforcing ``apply_safe`` in the dataclass rather
+    than trusting callers, and makes a check added later harmless by omission. That
+    cap alone is not the fix: it bounds a whole field to a number chosen for our own
+    prose, so a hostile fragment still consumes all of it, and it cannot reach
+    ``location`` at all. The fragment bound is what actually removes the
+    amplification; the field cap is what catches the site that forgets.
 
     **Why it truncates instead of raising.** ``Fix`` raises, correctly: a bad
     ``apply_safe`` means *our* code is wrong. Evidence length is chosen by whatever
@@ -54,10 +75,10 @@ def _bounded_evidence(evidence: str) -> str:
     families only; it cannot recognise a password, a session id or an email. Call
     sites still owe it a string that was safe to begin with.
     """
-    evidence = scrub(evidence)
-    if len(evidence) <= EVIDENCE_MAX_LEN:
-        return evidence
-    return evidence[: EVIDENCE_MAX_LEN - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+    text = scrub(text)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
 
 
 class Severity(IntEnum):
@@ -109,11 +130,13 @@ class Finding:
     ``location`` is structured (URL / file / dependency). ``evidence`` **must
     already be redacted and truncated by the caller** — that obligation is
     unchanged. ``__post_init__`` additionally scrubs recognisable credentials and
-    caps the length, but that is a backstop with a deliberately narrow reach and
-    is *not* a substitute for the caller's duty: it sees only ``evidence``, while
-    ``title``, ``remediation`` and ``location`` are equally exposed (all four are
-    written to reports and sent to the AI provider), and it runs once at
-    construction, so later mutation bypasses it entirely.
+    caps ``evidence``, ``title`` and ``remediation``, but that is a backstop with a
+    deliberately narrow reach and is *not* a substitute for the caller's duty: it
+    cannot reach ``location`` (contract §8 keys the fingerprint on it, so a cap
+    there would change identity, not prose), it bounds a whole field rather than
+    the untrusted fragment inside it, and it runs once at construction, so later
+    mutation bypasses it entirely. Target-derived text must go through
+    :func:`bounded` at the interpolation — see D52.
     ``references`` collects external identifiers (CWE/CVE/OWASP/URLs).
     ``scanner`` is the id of the emitting scanner. ``fix`` is an optional
     structured remediation; it stays ``None`` when there is no machine-usable fix.
@@ -134,7 +157,9 @@ class Finding:
         # Enforce the rule_id grammar at emit/construction time (contract §5),
         # matching the invariant checks the sibling Fix and Target dataclasses do.
         _validate_rule_id(self.rule_id)
-        self.evidence = _bounded_evidence(self.evidence)
+        self.evidence = bounded(self.evidence, EVIDENCE_MAX_LEN)
+        self.title = bounded(self.title, TITLE_MAX_LEN)
+        self.remediation = bounded(self.remediation, REMEDIATION_MAX_LEN)
 
     @property
     def fingerprint(self) -> str:
