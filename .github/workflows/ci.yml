@@ -76,7 +76,18 @@ jobs:
 
       # decisions.md quotes a test count. It was wrong three times, and each time
       # the change that broke it was adding tests. Checked rather than remembered.
+      #
+      # It also checks the figure in this repository's GitHub description, which is
+      # the copy that sat at 353 through two increments — no commit can touch it, so
+      # nothing in a diff was ever going to catch it. That makes this the one step
+      # here that needs the network. The token is not for access (the description is
+      # public) but for the rate limit: unauthenticated calls are 60/hour shared
+      # across every job leaving that runner's IP, which fails for reasons that have
+      # nothing to do with the claim. github.token is scoped by the permissions block
+      # above, which is contents: read and grants nothing else.
       - name: The documented test count is the real one
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python tools/check_test_count.py
 
       # The suite covers main() in-process. This covers the console script the

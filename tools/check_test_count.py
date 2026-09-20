@@ -1,4 +1,5 @@
-"""Assert the test count quoted in decisions.md is the count pytest collects.
+"""Assert the test count quoted in decisions.md and on the repo's own front page
+is the count pytest collects.
 
 This exists because that number was wrong three times in a row, and each time the
 thing that made it wrong was adding tests — the most routine change there is. A
@@ -8,28 +9,54 @@ commit that added this file: the inert-span guard took the suite 357 -> 367 and
 this script is what caught it, which is the check earning its keep on its first
 real outing rather than a hypothetical.)
 
-Run from the repo root: ``python tools/check_test_count.py``. Exits non-zero with
-both numbers and the line to edit. CI runs it; it needs no network and no state
-beyond a collection pass.
+Five times, counting the one that prompted the second check below. The GitHub
+repository description — the sentence under the repo name, and the only copy a
+visitor reads before they read anything else — sat at "353 tests" through two
+increments while every checked copy moved. It went stale precisely because this
+script's own error message enumerated every location it knew about and that one
+was not among them: the list was the map, and the map was missing a country.
 
-Deliberately not clever about where the number may live: one pattern, one file.
-Exactly one copy survives outside this repo — the portfolio résumé, which has its
-own source-to-PDF check — and CI here cannot see it, so the error message names it.
-The other two external copies were deleted rather than synced: a number in a place
-with no mechanism to check it is a liability, not a detail.
+So the description is now checked too, which costs this script the property it
+used to advertise: it needs the network. That is a real loss and worth naming.
+The tradeoff is that the alternative was to keep an unchecked number in the most
+widely read place it appears, and this repo's position on unchecked numbers is
+already recorded — see the message printed on failure.
+
+Run from the repo root: ``python tools/check_test_count.py``. Exits non-zero with
+both numbers and the exact ``gh repo edit`` command for whichever copy disagreed;
+both copies are checked on every run, so two stale numbers are two lines of output
+rather than two round trips. CI runs it.
+
+When the API cannot be reached it says so, in those words, rather than reporting
+agreement — D42 applied to this script instead of to the scanner: "we found
+nothing" and "we could not look" must not produce the same output. Under
+GITHUB_ACTIONS that state also exits non-zero, because a check that quietly skips
+itself in CI is precisely the green tick over nothing that this file exists to
+prevent. Run by hand it only reports, so a clone with no token still gets the
+decisions.md check rather than a wall.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shlex
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "decisions.md"
 
-# "... three report formats and 357 tests." Captures the digits only.
+API = "https://api.github.com/repos/{slug}"
+TIMEOUT = 15
+
+# "... three report formats and 357 tests." Captures the digits only. Used against
+# decisions.md and against the repo description, which quote the figure the same way.
 QUOTED = re.compile(r"\b(\d+) tests\b")
 
 # pytest's own summary line, e.g. "357 tests collected in 0.31s". "test" is
@@ -37,6 +64,16 @@ QUOTED = re.compile(r"\b(\d+) tests\b")
 # plain success shape is accepted, so a collection error fails loudly rather than
 # matching zero and comparing it to something.
 COLLECTED = re.compile(r"^(\d+) tests? collected\b", re.MULTILINE)
+
+EXTERNAL_COPIES = (
+    "One copy of this figure lives outside this repo and CI here cannot reach\n"
+    "it: the portfolio's assets/resume.src.html. Update it and rebuild the PDF\n"
+    "(node tools/build-resume.js), which checks the PDF against the source.\n"
+    "\n"
+    "There used to be two more, in the portfolio's js/data.js and the profile\n"
+    "README. They were deleted rather than synced, because a number nobody can\n"
+    "check is worse than no number. Do not add them back."
+)
 
 
 def collected_count() -> int:
@@ -56,33 +93,170 @@ def collected_count() -> int:
     return int(match.group(1))
 
 
-def main() -> int:
+def repo_slug() -> str | None:
+    """owner/repo for the checkout, or None if it cannot be established.
+
+    GITHUB_REPOSITORY first because in Actions it is authoritative and needs no
+    subprocess. The remote is the fallback so a hand run works, and so a fork
+    checks its own description rather than this one's — the figure is wrong or
+    right per repository, and hardcoding the slug would have every fork assert
+    against a page its owner cannot edit.
+    """
+    from_env = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if from_env.count("/") == 1:
+        return from_env
+
+    proc = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    url = proc.stdout.strip().removesuffix(".git")
+    # https://github.com/owner/repo and git@github.com:owner/repo both reduce to
+    # the last two path-ish segments; anything else is not a GitHub remote.
+    parts = re.split(r"[/:]", url)
+    if len(parts) < 2 or "github.com" not in url:
+        return None
+    return "/".join(parts[-2:])
+
+
+def description_count(slug: str) -> tuple[int | None, str, str | None]:
+    """(count, description, error). count is None when the description quotes no figure.
+
+    The description comes back alongside the count because the fix for a stale one
+    is a whole new description, not a patch: `gh repo edit` takes the replacement
+    string entire. Having it here means the failure message can print the exact
+    command rather than a sed expression the reader has to trust.
+
+    The description is public, so the token is an optimisation: authenticated
+    calls get the 5000/hour limit instead of 60/hour shared across everything
+    else leaving that runner's IP, which is the difference between this check
+    being reliable in CI and being reliable most of the time.
+    """
+    request = urllib.request.Request(
+        API.format(slug=slug),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            # The API rejects requests without one, and a named agent is the
+            # courtesy the scanner's own USER_AGENT exists to extend.
+            "User-Agent": f"secscan-check-test-count (+https://github.com/{slug})",
+        },
+    )
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+
+    # One retry, and only for the failures that are plausibly the network rather
+    # than the answer: a 5xx or a dropped connection. This gates commits, so a
+    # transient blip must not redden a pull request that did not cause it — the
+    # objection tools/check_floors.py raises against putting a network check on
+    # push. A 404 or a 403 is not retried, because repeating the question does not
+    # change a refusal, and a rate-limit 403 in particular deserves to be read.
+    last: str | None = None
+    for attempt in range(2):
+        if attempt:
+            time.sleep(2)
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as exc:
+            last = f"HTTP {exc.code} from the GitHub API for {slug}"
+            if exc.code < 500:
+                return None, "", last
+        except (urllib.error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", exc)
+            last = f"could not reach the GitHub API for {slug}: {reason}"
+        except json.JSONDecodeError as exc:
+            return None, "", f"the GitHub API returned something that is not JSON: {exc}"
+        else:
+            break
+    else:
+        return None, "", f"{last} (retried once)"
+
+    description = payload.get("description") or ""
+    quoted = QUOTED.search(description)
+    return (int(quoted.group(1)) if quoted else None), description, None
+
+
+def check_doc(actual: int) -> bool:
     text = DOC.read_text(encoding="utf-8")
     quoted = QUOTED.search(text)
     if quoted is None:
         print(f"no 'N tests' figure found in {DOC.name} — did the wording change?")
-        return 1
+        return False
 
-    actual = collected_count()
     claimed = int(quoted.group(1))
     if claimed == actual:
         print(f"{DOC.name} says {claimed} tests; pytest collects {actual}. Agreed.")
-        return 0
+        return True
 
     line_no = text[: quoted.start()].count("\n") + 1
     print(
         f"{DOC.name}:{line_no} claims {claimed} tests; pytest collects {actual}.\n"
         f"Update that line.\n"
-        f"\n"
-        f"One copy of this figure lives outside this repo and CI here cannot reach\n"
-        f"it: the portfolio's assets/resume.src.html. Update it and rebuild the PDF\n"
-        f"(node tools/build-resume.js), which checks the PDF against the source.\n"
-        f"\n"
-        f"There used to be two more, in the portfolio's js/data.js and the profile\n"
-        f"README. They were deleted rather than synced, because a number nobody can\n"
-        f"check is worse than no number. Do not add them back."
+        f"\n" + EXTERNAL_COPIES
     )
-    return 1
+    return False
+
+
+def check_description(actual: int) -> bool:
+    in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+
+    slug = repo_slug()
+    if slug is None:
+        print(
+            "could not work out which GitHub repository this checkout is, so the\n"
+            "repo description went unchecked (no GITHUB_REPOSITORY and no github.com\n"
+            "origin remote)."
+        )
+        return not in_ci
+
+    claimed, description, error = description_count(slug)
+    if error is not None:
+        print(
+            f"the repo description went unchecked: {error}.\n"
+            f"decisions.md was still checked. Re-run with a network, or see\n"
+            f"https://github.com/{slug} and compare the sentence under the repo name."
+        )
+        return not in_ci
+
+    if claimed is None:
+        print(
+            f"{slug}'s description quotes no test count, so there is nothing there\n"
+            f"to go stale. Nothing to do."
+        )
+        return True
+
+    if claimed == actual:
+        print(f"{slug}'s description says {claimed} tests; pytest collects {actual}. Agreed.")
+        return True
+
+    # count=1 so only the figure that was compared is rewritten; a description
+    # that somehow quotes two counts should be looked at by a person, not
+    # silently normalised by a suggestion this script printed.
+    corrected = QUOTED.sub(f"{actual} tests", description, count=1)
+    print(
+        f"{slug}'s description claims {claimed} tests; pytest collects {actual}.\n"
+        f"It is the first sentence a visitor reads and it is the one copy no commit\n"
+        f"can fix, which is why it stayed at 353 while everything else moved. Run:\n"
+        f"\n"
+        f"  gh repo edit {slug} --description {shlex.quote(corrected)}\n"
+        f"\n" + EXTERNAL_COPIES
+    )
+    return False
+
+
+def main() -> int:
+    actual = collected_count()
+    # Both checks run before either verdict is returned, so two stale copies are
+    # one run's output rather than two. `and` would short-circuit the second.
+    doc_ok = check_doc(actual)
+    description_ok = check_description(actual)
+    return 0 if doc_ok and description_ok else 1
 
 
 if __name__ == "__main__":

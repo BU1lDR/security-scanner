@@ -15,8 +15,17 @@ Deliberately NOT run on push. Its answer depends on what OSV published today, so
 wiring it into per-commit CI would redden unrelated pull requests on the morning a
 new advisory lands — a check that fails for reasons the commit did not cause
 teaches people to ignore it. It runs on a schedule and on demand instead, and
-tools/check_test_count.py (whose answer depends only on the tree) is the one that
-gates commits. Different failure modes, different triggers.
+tools/check_test_count.py is the one that gates commits. Different failure modes,
+different triggers.
+
+That distinction used to be "ours depends on the world, theirs depends only on the
+tree", and it no longer is: check_test_count now reads this repository's GitHub
+description, which is off the tree. The distinction that actually mattered survives
+the change, though, which is why it was allowed. Nobody on this project controls
+what OSV publishes, so that check can go red on a morning when every claim in the
+commit is true. The description can only disagree with the suite because someone
+here left a number wrong — a real defect, in the copy most people read, and the
+only copy no diff can show you.
 
 Usage::
 
