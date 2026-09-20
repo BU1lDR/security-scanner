@@ -7,10 +7,12 @@
 # ignore. ci.yml holds the checks whose answers depend only on the tree.
 #
 # It runs on a timer, and the timer is the point: cryptography>=42 sat in
-# pyproject.toml until 42.0.0 had fifteen advisories against it, four of them
-# HIGH, and nothing noticed, because every environment anyone actually built
-# resolved far above it. A floor is a claim about what is supported; nobody
-# re-reads it.
+# pyproject.toml until OSV had several HIGH advisories against 42.0.0, and nothing
+# noticed, because every environment anyone actually built resolved far above it. A
+# floor is a claim about what is supported; nobody re-reads it. How many advisories
+# there are is not written down here for the same reason this job exists — the
+# answer is OSV's to change, so it is queried on a schedule instead of quoted from
+# the last time somebody looked.
 #
 # Two things to know about scheduled workflows: they only run from the default
 # branch, and GitHub disables them after 60 days with no repository activity. If

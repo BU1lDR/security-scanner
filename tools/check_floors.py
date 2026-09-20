@@ -2,9 +2,12 @@
 
 A floor like ``cryptography>=42`` is a claim that 42.0.0 is a supported install.
 That claim ages badly: the floor does not move, and advisories against old
-versions keep being published. cryptography>=42 sat in pyproject.toml until
-42.0.0 had fifteen advisories against it, four of them HIGH — and nothing noticed,
-because every environment anyone actually built resolved far above it.
+versions keep being published. cryptography>=42 sat in pyproject.toml until OSV
+had several HIGH advisories against 42.0.0 — and nothing noticed, because every
+environment anyone actually built resolved far above it. This docstring does not
+say how many, because that is the one number on this page nobody here controls;
+the script's job is to ask, and a figure written down beside it would be a second
+answer competing with the live one.
 
 This is the same check secscan's own SCA scanner performs on other people's
 manifests, pointed at ours. Running it is not optional good citizenship; a
@@ -110,9 +113,16 @@ def dedupe(vulns: list[dict]) -> list[dict]:
     """One entry per real-world flaw.
 
     OSV returns one record per source database, so a single CVE arrives as a GHSA
-    *and* a PYSEC record that alias each other, and the first version of this
-    script printed cryptography's eight flaws as fifteen. Records belong together
+    *and* a PYSEC record that alias each other. Against cryptography 42.0.0 that
+    was fifteen records for nine flaws, and the first version of this script
+    reported all fifteen — an inflated count is not a harmless cosmetic bug in a
+    tool whose output is meant to justify raising a floor. Records belong together
     when their identifier sets intersect.
+
+    Ratio, not counts: fifteen-for-nine was true on the day the floors were
+    raised, and how many of either there are now is OSV's business. The numbers
+    are here because this paragraph is about a fixed defect rather than about
+    cryptography — the live answer is whatever the script prints today.
 
     The scanner does this properly in scanners/sca/scanner.py (_cluster_vulns,
     union-find over the alias graph, which also merges A-B and B-C into one

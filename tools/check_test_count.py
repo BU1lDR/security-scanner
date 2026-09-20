@@ -38,6 +38,7 @@ decisions.md check rather than a wall.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -164,11 +165,20 @@ def description_count(slug: str) -> tuple[int | None, str, str | None]:
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                 payload = json.load(response)
         except urllib.error.HTTPError as exc:
+            # First, because HTTPError is a URLError is an OSError: reversing these
+            # two clauses would read every status code as a network failure.
             last = f"HTTP {exc.code} from the GitHub API for {slug}"
             if exc.code < 500:
                 return None, "", last
-        except (urllib.error.URLError, TimeoutError) as exc:
-            reason = getattr(exc, "reason", exc)
+        except (OSError, http.client.HTTPException) as exc:
+            # OSError, not URLError, because URLError does not mean "the network
+            # failed" — it means urlopen wrapped the failure, which it only does
+            # before the response starts. Once bytes are arriving a dropped
+            # connection surfaces as ConnectionResetError or http.client's
+            # IncompleteRead, so the comment above promising a retry on "a dropped
+            # connection" was describing a traceback. HTTPException is the one
+            # family here that is not an OSError at all.
+            reason = getattr(exc, "reason", exc) or exc.__class__.__name__
             last = f"could not reach the GitHub API for {slug}: {reason}"
         except json.JSONDecodeError as exc:
             return None, "", f"the GitHub API returned something that is not JSON: {exc}"
@@ -183,21 +193,46 @@ def description_count(slug: str) -> tuple[int | None, str, str | None]:
 
 
 def check_doc(actual: int) -> bool:
+    """Compare every figure decisions.md quotes, not the first one.
+
+    finditer rather than search. The file quotes the count once today, which is
+    what made search look sufficient, and nothing stops the next paragraph about
+    the suite from quoting it again — the sibling project managed exactly that: the
+    same commit that added its version of this check added a README paragraph
+    explaining the check, which quoted the figure a second time, four lines below
+    the copy the check corrects. A loop that stops at the first match would have
+    fixed one copy and certified the other in the same breath.
+    """
     text = DOC.read_text(encoding="utf-8")
-    quoted = QUOTED.search(text)
-    if quoted is None:
-        print(f"no 'N tests' figure found in {DOC.name} — did the wording change?")
+
+    quoted = [
+        (text[: match.start()].count("\n") + 1, int(match.group(1)))
+        for match in QUOTED.finditer(text)
+    ]
+
+    if not quoted:
+        print(
+            f"no 'N tests' figure found in {DOC.name} at all. Either the wording\n"
+            f"changed, in which case fix QUOTED, or the sentence was deleted — and\n"
+            f"this check now passes by not looking, which is worse than the drift it\n"
+            f"exists to catch."
+        )
         return False
 
-    claimed = int(quoted.group(1))
-    if claimed == actual:
-        print(f"{DOC.name} says {claimed} tests; pytest collects {actual}. Agreed.")
+    stale = [item for item in quoted if item[1] != actual]
+    if not stale:
+        where = ", ".join(f"line {line_no}" for line_no, _ in quoted)
+        print(
+            f"{DOC.name} says {actual} tests at {where}; pytest collects {actual}. "
+            f"Agreed."
+        )
         return True
 
-    line_no = text[: quoted.start()].count("\n") + 1
+    print(f"pytest collects {actual} tests. {DOC.name} disagrees:")
+    for line_no, claimed in stale:
+        print(f"  {DOC.name}:{line_no} claims {claimed}")
     print(
-        f"{DOC.name}:{line_no} claims {claimed} tests; pytest collects {actual}.\n"
-        f"Update that line.\n"
+        f"Update {'that line' if len(stale) == 1 else 'all of them'}.\n"
         f"\n" + EXTERNAL_COPIES
     )
     return False

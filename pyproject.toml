@@ -29,8 +29,10 @@ license = { text = "MIT" }
 #
 # Every floor below is the lowest version with no OSV advisory against it, and
 # each was queried rather than guessed. cryptography>=42 was the bad one: 42.0.0
-# is installable and carries fifteen advisories, four of them HIGH. It is raised
-# to 50, which is where CVE-2026-69247 (a Bleichenbacher oracle in PKCS#7
+# is installable and OSV has several HIGH advisories against it. No count is
+# written here on purpose — how many there are is OSV's to change, weekly, and
+# tools/check_floors.py asks rather than repeating a number from last time. It is
+# raised to 50, which is where CVE-2026-69247 (a Bleichenbacher oracle in PKCS#7
 # EnvelopedData decryption) is fixed — not a path this scanner walks, but a floor
 # is a claim about what is supported, not about what today's lockfile resolves.
 #

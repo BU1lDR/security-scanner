@@ -100,7 +100,7 @@ Nothing in the suite touches the network — no live host, no OSV, no API key, s
 python -m pytest -q --disable-socket --allow-hosts=127.0.0.1,::1
 ```
 
-CI also checks that the test count quoted in [decisions.md](decisions.md) — and in this repository's GitHub description, the one copy of that number no commit can reach — is the number pytest actually collects. It sat at 353 there through two increments for exactly that reason. And weekly, not per-commit, CI asks OSV whether the lowest version each dependency floor admits has a known vulnerability; that one found `cryptography>=42` pointing at a version with fifteen advisories against it.
+CI also checks that the test count quoted in [decisions.md](decisions.md) — and in this repository's GitHub description, the one copy of that number no commit can reach — is the number pytest actually collects. It sat at 353 there through two increments for exactly that reason. And weekly, not per-commit, CI asks OSV whether the lowest version each dependency floor admits has a known vulnerability; that one found `cryptography>=42` pointing at a version with several HIGH advisories against it.
 
 And it scans this project with itself:
 
