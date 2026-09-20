@@ -188,7 +188,7 @@ the traffic is still attack-shaped and it still reaches the target.
 | --- | --- | --- |
 | `dast.active.enabled` | `false` | Equivalent to `--active`. |
 | `dast.active.checks` | `[]` | Which checks to run; `[]` means all of them. Valid names: `xss-reflected`, `sqli-error`, `open-redirect`. |
-| `dast.active.include_post` | `false` | Whether to inject into POST forms as well as GET query parameters. GET-only is the safe default: a POST is more likely to change state on the target. |
+| `dast.active.include_post` | `false` | Whether to inject into POST forms as well as GET query parameters. GET-only is the safe default: a POST is more likely to change state on the target. There is deliberately no command-line flag, so turning this on takes a config file — worth knowing, because it also means the body path is unreachable from `argv` alone, and that is how the bug in D51 survived every live run before it. |
 | `dast.active.max_requests` | `200` | Total budget for active traffic. Reaching it is logged. |
 
 ## `ai` — optional finding explanations

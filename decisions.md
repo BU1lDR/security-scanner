@@ -246,6 +246,8 @@ Every other layer had been exercised against the real world (D41); the active ti
 
 **Why:** The active tier is the only part of this tool that can affect somebody else's system, so it is the part whose safety claims deserve evidence rather than argument. Unit tests can only confirm the code does what its author believed; they are written from the same understanding that produced the code, so a wrong belief passes both. The wire log breaks that circle — it is an independent witness, and it is what turned "the payloads are detection-only" from a design intention into a checked fact, while also surfacing a redaction leak that every unit test had passed straight over. The pattern worth keeping is the matched pairs and the positive control: a verification that can only succeed proves nothing, whether the thing that can't fail is the target or the harness.
 
+> **Extended by [D56]:** Both patterns were kept, and are now in the tree rather than in this paragraph. The run described above could not be repeated — its target and its harness were never committed — so what it established expired as the code moved. `tools/check_active_rehearsal.py` re-runs the matched pairs and the positive control on every push.
+
 ### D44 — A documented invariant that nothing enforces is just a comment
 D43 fixed one evidence leak. This decision is about why fixing one was not enough. `Finding.evidence` carried the sentence *"must already be redacted and truncated at construction — raw secrets or cookie values never reach a Finding"*, and that rule was enforced in exactly zero places. Eight construction sites each decided for themselves what it meant, and one had decided wrong for as long as the check had existed.
 
@@ -493,6 +495,8 @@ that library and nothing else. Three tiers of defence existed here — a broad
 exception handler, a unit suite, and a live wire capture — and all three were
 satisfied by code that did nothing, because each of them was built from the same
 misunderstanding as the code it was guarding.
+
+> **Extended by [D56]:** The PyGoat run that found this was not repeatable either, and the default that hid the bug is the same default that would hide its return: `include_post` is off, so the body path stays unreachable from argv alone. The rehearsal gate therefore runs with a config file that turns it on, and asserts a urlencoded body with its sibling CSRF field intact arrived at the server — reverting this fix is one of the eight mutations that must turn that gate red.
 
 ### D52 — The bound belongs where the target's text arrives, not where it leaves
 
@@ -877,6 +881,105 @@ denominator — and the reader has no way to tell that the number shrank to fit 
 could read. [D42]'s rule, that an unreachable database is an unknown answer and not a clean
 one, was already cited in this very file for the outage case. It had simply never been
 applied to the half of the problem that lives in the tree.
+
+---
+
+### D56 — The active tier had been verified live twice and gated never
+Stating the gap precisely matters here, because the obvious framing is wrong. The active
+tier had been aimed at a real server over a real socket before this decision — twice.
+[D43] pointed it at a deliberately-flawed host on `127.0.0.1` and read all 33 requests off
+the wire, which is how the evidence leak in [D44] surfaced. [D51] pointed it at PyGoat and
+caught a POST body that never left the process. The tier was not unverified. It was
+unrepeatable: both harnesses lived on one machine and neither was ever committed, so
+`--active` appeared in no workflow and no tool, and the repository's only end-to-end gate,
+`tools/check_self_scan.py`, scans `./src` — a *code* target, so it never starts the DAST
+path at all. Passive was in the same position. The crawl and all five analyzers had no gate
+either; that nobody had said so out loud is part of the same oversight.
+
+**Why an absence this large stayed invisible.** An entry in this file that describes a live
+run reads exactly like a check that runs. D43 is four paragraphs of counts — 33 requests,
+2.07 per second, four true positives and zero false positives — and detail at that
+resolution persuades precisely because it could only have come from a real run. It did.
+What counts cannot tell you is whether they are still true, and the artifacts that would
+let anyone ask were never in the tree: what survives is testimony, not evidence. So the
+entry quietly ages into a claim about a commit several hundred commits back, while reading
+it produces the same feeling as a passing gate. That is the specific hazard in a project
+whose main artifact is a record — a record of having checked something sits in the same
+place in the reader's mind as a check, and only one of the two notices when the code moves.
+
+**What landed.** `tools/check_active_rehearsal.py`: a stdlib-only deliberately-flawed site
+bound to `127.0.0.1` on an ephemeral port, the scanner run against it as a subprocess, and
+the assertions made against the *server's* own record of what it received. Routes come in
+matched pairs, which is D43's design and the reason to keep it: one route is genuinely
+flawed and its twin has the flaw's guard in place, so `/reflect` must report reflected XSS
+while `/reflect-safe`, which HTML-escapes the same input, must report nothing; `/report`
+emits a database error only when a quote is present while `/report-broken` emits one
+regardless and must therefore be refused as unattributable; `/go` honours its `next`
+parameter while `/go-fixed` returns a real 302 to a fixed internal path and must not be
+called an open redirect. The assertion is an exact per-route equality of rule IDs, so a
+false negative and a false positive fail the same check. Two further routes carry the
+changes that had never been exercised outside a fixture: `/long` puts a 4000-character
+parameter *name* into the crawlable HTML, so [D52]'s bounding is tested on data the target
+chose, and `/comment` is a POST form with a hidden CSRF field beside the targeted one, so
+the body path from [D51] is exercised with its sibling-preservation intact.
+
+**It reads the wire, not the exit code, and that is the whole design.** Every way this
+check could be vacuous ends in a clean-looking exit 0. `crawler._is_html` requires the
+literal substring `html` in `Content-Type` and Python's `BaseHTTPRequestHandler` does not
+send that header for you, so a hand-written handler yields zero links, zero forms, zero
+injection points, and a healthy-looking empty report. `crawler._get` catches bare
+`Exception` and returns `None`, so a refused connection and a read timeout leave no record
+anywhere — start the scanner before the socket is accepting and it reports a clean site it
+never reached. A redirect on the entry path empties the crawl for a third reason. Asserting
+`exit == 1` would have passed under all three. So the site keeps an untruncated log of
+every request, the scanner is a subprocess and cannot touch it, and the positive control
+runs before any judgement about findings: requests arrived, the active scanner was
+selected, probe payloads are present on the wire. That ordering is D43's lesson repaid —
+its first harness reported PASS on all eight gate cases while the scanner registry was
+empty and nothing had run.
+
+Both directions, as in `check_self_scan.py`, because either half alone is passable by a
+broken build. The second half re-runs the same scan with `--i-am-authorized` withheld and
+requires that not one probe payload reaches the socket, that the run still *connects* (so
+its silence is refusal rather than a failure to reach the host), that the refusal is
+announced on stderr, and that the report does not claim active traffic it never sent. A
+build that ignores the gate passes the first half; one that sends nothing passes the
+second. The run also needs a config file rather than pure argv, because `include_post` has
+no CLI flag — the body path is unreachable from the command line alone, which is exactly
+how D51's bug survived every live run before it.
+
+**Verified by breaking it, not by watching it pass.** Twenty-nine assertions going green in
+three seconds over 39 requests is not evidence; D48 exists because a CI step that could
+only pass had pinned the tool's worst output as its expected output. So eight mutations were
+applied one at a time and reverted: reinstating D51's `data=`-a-list-of-pairs POST; removing
+[D52]'s `bounded()` call; treating an HTML-escaped reflection as a finding; deleting the
+SQLi baseline comparison; dropping the open-redirect hostname test; making
+`Scope.active_allowed` return `True` unconditionally; stopping the fake site from sending
+`Content-Type`; and flipping `include_post` back to `false`. All eight turned the step red,
+each on the assertion written for it — the Content-Type mutation reported `0 of 6 requests
+carried the marker`, which is the vacuity the design is aimed at, caught by the positive
+control rather than by a wrong finding.
+
+**What it does not cover, said plainly.** It re-verifies one of D43's eight gate cases, the
+CLI-reachable one; the API-level cases, including the egress host planted into the active
+allowlist, are not here. It says nothing about pacing, because `http.per_host_rps` is
+turned up to 25 for CI wall-clock, where D43 measured 2.07 requests per second against a
+real host. It cannot reach exit `3` ([D54]): nothing in this run records an error, and the
+path that can is SCA discovery, which needs a code target. The probe strings are pinned
+copies rather than imports from `checks.py`, deliberately — importing them would make the
+gate agree with the code by construction, so a renamed marker would move both sides
+together and the assertion would still pass. And the three crawler traps above are
+conditions this gate *avoids*, not properties it verifies; that the crawler silently
+swallows a refused connection is still true, and is still only recorded here.
+
+**Why:** The active tier is the one part of this tool that can affect somebody else's
+machine, so it is the part whose safety claims should survive a change to the tree rather
+than a change to the reader's memory. A one-off verification is a statement about a commit;
+a gate is a statement about the branch. The difference only shows up later, which is why
+the run that proves the point is always the one nobody did. [D55] landed the same day and
+is the same shape one layer down: there the guard ran and published a denominator it had
+never measured, here the guard did not exist and this file said it had. Both are the code
+that checks our claims being the code that was exempt from being checked.
 
 ---
 

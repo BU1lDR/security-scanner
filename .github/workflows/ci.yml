@@ -121,3 +121,31 @@ jobs:
       # it would have "broken CI". See D48.
       - name: The exit code means something in both directions
         run: python tools/check_self_scan.py
+
+      # The active tier is the one part of this tool that sends attack-shaped
+      # traffic at somebody else's server, and until this step nothing here ran
+      # it. The step above scans ./src, a *code* target, so the entire DAST path
+      # -- passive included -- had never been started end-to-end by any gate.
+      #
+      # It had been exercised live twice, by hand: D43 against a deliberately
+      # flawed server on 127.0.0.1 with a wire capture of all 33 requests, and
+      # D51 against PyGoat, which is where a POST body that never left the
+      # process was caught. Neither harness landed in the repository. So both
+      # runs expired as soon as the tree moved past them -- a one-off
+      # verification is a statement about a commit, and a gate is a statement
+      # about the branch.
+      #
+      # Loopback only: the site binds 127.0.0.1 on an ephemeral port, and the
+      # open-redirect probe names example.org in a parameter *value* while the
+      # request itself goes to that loopback port. Nothing here needs the
+      # network, so it runs inside the same permissions block as everything else.
+      #
+      # It asserts against the fake server's own request log rather than against
+      # the exit code, because every way this check could go vacuous ends in a
+      # clean-looking exit 0: responses without a Content-Type containing "html"
+      # yield zero injection points, and crawler._get swallows a refused
+      # connection and returns None. Checked by mutation rather than assumed --
+      # reverting the D51 POST bug, removing D52's bounding, and disabling each
+      # check's false-positive guard in turn each turn this step red. See D56.
+      - name: The active tier still does what it says, over a real socket
+        run: python tools/check_active_rehearsal.py

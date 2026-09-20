@@ -89,6 +89,8 @@ secscan https://your-own-site.com --active --i-am-authorized
 
 Only run those against something you own or have permission to test. The payloads are built to *detect* problems, not exploit them, but the rule still stands.
 
+That the refusal actually holds is checked on every push, not just asserted here: CI runs the active tier against a broken site on loopback with the authorization flag left off, and requires that nothing attack-shaped reaches the socket. See [Running the tests](#running-the-tests).
+
 ## Running the tests
 
 ```bash
@@ -111,6 +113,14 @@ python tools/check_self_scan.py
 ```
 
 Our own source has to come back with no SAST findings, *and* a deliberately planted `eval(request.body)` has to come back with one. Both directions, because a scanner that reports nothing passes the first test and one that reports everything passes the second. This used to fail badly — see D48.
+
+The active checks get the same treatment, against a deliberately-broken website this repository starts on loopback for the purpose:
+
+```bash
+python tools/check_active_rehearsal.py
+```
+
+Eight routes in matched pairs — one genuinely vulnerable, one where the same input is handled safely — so the run shows the checks are *right* rather than merely loud. It judges by the fake server's own log of what it received rather than by the scanner's exit code, because a crawl that never connects reports a clean site and exits `0`: the exit code is the one signal that can't tell you the scan happened. Then it runs the whole thing again with `--i-am-authorized` left off and requires that not one test payload reaches the socket. Everything it checks was confirmed by deliberately breaking the scanner eight different ways and watching it go red — see D56.
 
 ## Want to know how it works?
 
