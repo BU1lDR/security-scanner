@@ -227,3 +227,89 @@ def test_the_skip_does_not_take_sast_out_of_the_scanners_that_ran(tmp_path):
     assert report.scanners_run == ["sast"]
     assert [s.check for s in report.skipped] == ["binary"]
     assert report.errors == []
+
+
+# ── the lines inside a file it did read (D72) ─────────────────────────────────
+#
+# The walk's four reasons are all about files. A line is the unit one layer in, and
+# the bound on line length was the one policy decline with no channel at all: a
+# bundled app.js is text, under the size limit and named nothing the asset filter
+# catches, so it passed every filter, was read, had all 17 rules skipped over its
+# single 2554-character line, and came back indistinguishable from an empty file.
+
+_KEY = "AKIAIOSFODNN7EXAMPLE"
+
+
+def _bundled(secret: str) -> bytes:
+    """One long line with a secret in it — what a bundler emits."""
+    return f"!function(e){{var t={'x' * 2500};var k=\"{secret}\";}}(0);\n".encode()
+
+
+def test_a_secret_on_a_line_too_long_to_match_is_disclosed_not_dropped(tmp_path):
+    (tmp_path / "bundle.js").write_bytes(_bundled(_KEY))
+    ctx = _ctx(tmp_path)
+    findings = _collect(ctx)
+
+    # Still not reported as a finding: the bound is the policy, and this test is not
+    # asking for it to be lifted.
+    assert "sast.secret.aws-access-key" not in _ids(findings)
+    long_line = [s for s in ctx.skipped if s.check == "long-line"]
+    assert len(long_line) == 1, ctx.skipped
+    assert "1 line(s) across 1 file(s)" in long_line[0].reason
+    assert "2000" in long_line[0].reason
+    assert "not a clean result" in long_line[0].reason
+    # A bound the project chose and hits on ordinary checkouts is not a failure.
+    assert ctx.errors == []
+
+
+def test_the_same_secret_on_a_short_line_is_still_reported(tmp_path):
+    """The measurement that found this: two files, one key, one report. Without this
+    control the test above passes on a scanner that has stopped reading secrets."""
+    (tmp_path / "config.js").write_bytes(f'var k = "{_KEY}";\n'.encode())
+    ctx = _ctx(tmp_path)
+    assert "sast.secret.aws-access-key" in _ids(_collect(ctx))
+    assert [s.check for s in ctx.skipped] == []
+
+
+def test_the_counts_add_up_across_files_and_lines(tmp_path):
+    """One skip, not one per line or one per file — and the numbers in it are the two
+    a reader can act on. Three long lines over two files."""
+    (tmp_path / "a.js").write_bytes(_bundled(_KEY) + _bundled("x"))
+    (tmp_path / "b.js").write_bytes(b"var ok = 1;\n" + _bundled("y"))
+    ctx = _ctx(tmp_path)
+    _collect(ctx)
+
+    long_line = [s for s in ctx.skipped if s.check == "long-line"]
+    assert len(long_line) == 1, ctx.skipped
+    assert "3 line(s) across 2 file(s)" in long_line[0].reason
+
+
+def test_a_tree_of_ordinary_lines_records_no_long_line_skip(tmp_path):
+    """The other direction. A skip emitted unconditionally says nothing."""
+    (tmp_path / "app.py").write_bytes(b"eval(x)\n")
+    ctx = _ctx(tmp_path)
+    assert _ids(_collect(ctx)) == {"sast.sink.python-eval"}
+    assert ctx.skipped == []
+
+
+def test_the_long_line_skip_leaves_sast_in_the_scanners_that_ran(tmp_path):
+    """``check`` has to be non-empty. Disclosing this as a whole-scanner skip would
+    delete SAST from the "Ran:" line of every scan of a repository with a bundle in
+    it, taking the findings it did make with it."""
+    import asyncio
+
+    from scanner.core.engine import Engine
+    from scanner.core.registry import Registry
+
+    (tmp_path / "app.py").write_bytes(b"eval(x)\n")
+    (tmp_path / "bundle.js").write_bytes(_bundled(_KEY))
+
+    reg = Registry()
+    reg.register(SastScanner)
+    target = Target(code_path=str(tmp_path), scope=Scope())
+    report = asyncio.run(Engine(registry=reg).run(target))
+
+    assert report.scanners_run == ["sast"]
+    assert [s.check for s in report.skipped] == ["long-line"]
+    assert _ids(report.findings) == {"sast.sink.python-eval"}
+    assert report.errors == []

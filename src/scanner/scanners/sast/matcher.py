@@ -47,7 +47,11 @@ from scanner.scanners.sast.rules import (
     shannon_entropy,
 )
 
-_DEFAULT_MAX_LINE_LEN = 2000  # skip minified/generated lines: noisy and slow
+#: Lines longer than this are not matched: minified and generated lines are slow to
+#: run 17 regexes over and produce nothing a human would act on. Public because the
+#: scanner names the number in the sentence it puts in the report, and a bound that
+#: is disclosed from a second copy of the literal is one stale edit from lying.
+DEFAULT_MAX_LINE_LEN = 2000
 
 _PY_SUFFIXES = frozenset({".py", ".pyw"})
 
@@ -122,12 +126,28 @@ def scan_text(
     path: str,
     rules: list[Rule] = RULES,
     min_confidence: Confidence = Confidence.TENTATIVE,
-    max_line_len: int = _DEFAULT_MAX_LINE_LEN,
+    max_line_len: int = DEFAULT_MAX_LINE_LEN,
+    long_lines: list[int] | None = None,
 ) -> list[Finding]:
     """Apply ``rules`` to ``text`` and return the findings, one per (rule, line).
 
     ``path`` is the display path recorded on each finding. Rules below
     ``min_confidence`` are skipped entirely.
+
+    ``long_lines`` collects the line numbers this call declined to match, which is
+    the part of a file's result that the return value cannot carry. A line over
+    ``max_line_len`` is not examined at all, so an AWS key sitting on line 1 of a
+    bundled ``app.js`` produced the same empty list as a file with nothing in it —
+    verified end to end before the fix, with the same key reported from a short line
+    in the file next to it and never mentioned from the long one (D72).
+
+    A sink rather than a second return value, mirroring
+    :func:`~scanner.scanners.sast.walk.iter_source_files`: the ``list[Finding]``
+    return is what every caller and test reads, and widening it to a tuple to carry
+    a line count would rewrite two dozen call sites to describe a bound that is
+    usually not hit. The risk of a sink is the caller who omits it, so the one
+    production caller is held to passing it by a test of the report, not of this
+    function.
     """
     suffix = PurePath(path).suffix
     active = [
@@ -144,6 +164,10 @@ def scan_text(
     findings: list[Finding] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         if len(line) > max_line_len:
+            # Recorded, not merely skipped. Everything else in this loop that
+            # produces nothing has looked and found nothing; this has not looked.
+            if long_lines is not None:
+                long_lines.append(lineno)
             continue
         for rule in active:
             finding = _match_line(rule, line, path, lineno, inert)

@@ -98,10 +98,41 @@ def test_distinct_lines_each_yield_a_finding():
     assert lines == [1, 3]
 
 
-def test_overlong_lines_are_skipped():
+def test_an_overlong_line_is_skipped_and_says_which_line_it_was():
+    """Skipping it is the policy and is not in question; the old assertion was
+    ``findings == []`` and nothing else, which is the value this function returns for
+    a line it examined and found clean. A generated file is one long line, so that
+    made every rule in the pack silently inapplicable to it (D72)."""
     text = "x = eval(" + "a" * 5000 + ")\n"
-    findings = scan_text(text, path="a.py", max_line_len=2000)
+    long_lines: list[int] = []
+    findings = scan_text(text, path="a.py", max_line_len=2000, long_lines=long_lines)
     assert findings == []
+    assert long_lines == [1]
+
+
+def test_a_file_of_ordinary_lines_reports_none_skipped():
+    """The other direction, first: a sink that collected every line would satisfy the
+    test above and put a skip on the report for every file in the tree."""
+    long_lines: list[int] = []
+    findings = scan_text("x = eval(a)\n", path="a.py", long_lines=long_lines)
+    assert long_lines == []
+    assert findings, "the positive control has to actually match something"
+
+
+def test_a_long_line_does_not_stop_the_rest_of_the_file_being_matched():
+    text = "pad = '" + "a" * 3000 + "'\nx = eval(a)\n"
+    long_lines: list[int] = []
+    findings = scan_text(text, path="a.py", long_lines=long_lines)
+    assert long_lines == [1]
+    assert [f.location.line for f in findings
+            if f.rule_id == "sast.sink.python-eval"] == [2]
+
+
+def test_the_sink_is_optional_so_the_default_call_still_works():
+    """Every other caller passes ``list[Finding]`` around and should not have to know
+    this exists. The one production caller is held to passing it by
+    ``test_sast_scanner``, which reads the report rather than this signature."""
+    assert scan_text("x = eval(" + "a" * 5000 + ")\n", path="a.py") == []
 
 
 def test_confidence_is_carried_from_the_rule():

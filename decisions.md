@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 587 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 595 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2151,6 +2151,69 @@ attribute the result. What was missing was the step from "we know this is
 unattributable" to "so the report has to say that" — which is the step a comment
 cannot take. A comment records what the author understood; only a channel makes the
 understanding reach the reader.
+
+---
+
+### D72 — A secret on a generated line was not reported and not mentioned either
+
+**The walk has four reasons and the matcher had a fifth with no channel.** `walk`
+splits what it could not read into failures and policy declines, and the scanner
+routes each to the right place: an unlistable directory is an error and exits 3, an
+oversized or binary file is an aggregated skip. One line further in, `scan_text`
+declines any line over 2000 characters — generated and minified code, where 17
+regexes cost real time and produce nothing a human acts on — and recorded nothing at
+all. A bundler's output is one long line, is text, is under the 1 MB limit and is not
+named `.min.js`, so it passed every filter the walk has, was read, had every rule
+skipped over it, and came back as a file with nothing in it.
+
+**Measured with one key in two files.** `AKIAIOSFODNN7EXAMPLE` on a short line in
+`config.js` and the same key inside a 2554-character line in `bundle.js`. The report
+named `config.js:1` and did not mention `bundle.js` in any section — not findings, not
+errors, not skips, not the log. The same report carried SCA's `no-manifest` finding,
+whose text reads "This is not a clean result: the dependency check had nothing to
+read." That sentence is the project's own standard for this situation and SAST's
+line filter did not meet it.
+
+**A sink, for the reason `iter_source_files` uses one.** `scan_text` returns
+`list[Finding]` to one production caller and two dozen test call sites; widening that
+to a tuple would rewrite all of them to carry a number that is usually zero. So the
+line numbers go into an optional `long_lines` list, and the risk that a caller omits
+it is closed from the other side: the test that holds the single production caller to
+passing it reads the *report*, not the signature, so the assertion survives a
+refactor of how the count travels.
+
+**A skip, not a failure, and the sentence carries both numbers.** `max_line_len`
+exists to be hit, and a tool that exits 3 because a checkout contains a bundle has
+spent exit 3 on nothing — `walk`'s stated reason for keeping `too-large` out of
+`INCOMPLETE_KINDS`, one layer in. One aggregated line, not one per line or per file,
+for the reason the file-level declines are aggregated: nobody chases an individual
+generated line. `DEFAULT_MAX_LINE_LEN` stopped being private so the number in the
+report comes from the bound rather than from a second copy of the literal.
+
+**Fifth time a green test was pinning the defect.** `test_overlong_lines_are_skipped`
+asserted `findings == []` and nothing else, which is the value `scan_text` returns for
+a line it examined and found clean — the same assertion shape as D71's, one commit
+earlier, in a different scanner. After D57, D66, D70 and D71 the rule is worth stating
+plainly: `== []` is never a complete assertion about a security check, because it
+cannot distinguish the two answers the check is obliged to distinguish. Inverted,
+with the other-direction control beside it.
+
+**Thirteen mutations, thirteen red.** Recording nothing again, recording every line,
+dropping the sink at the scanner, not disclosing it, disclosing it as a whole-scanner
+skip, disclosing it as a failure, losing the bound from the sentence, losing the
+counts, dropping the "not a clean result" clause, printing the file count where the
+line count belongs, emitting on a clean tree, the production caller omitting the sink,
+and a long line aborting the rest of its file. Suite 587 to 595.
+
+**Why:** Every layer above this one had already been fixed. `walk` distinguishes
+"could not" from "chose not to", the scanner routes those to different channels, and
+both were written with the argument spelled out. The bound one level below them was
+older than all of that and was never revisited, because nothing about it looked like
+an omission: `continue` in a loop is not a swallowed exception, has no handler to
+notice, and reads as a performance decision rather than a coverage one. That is the
+useful generalisation — the sweep for silent non-answers has been reading exception
+handlers and early returns, and a `continue` inside a loop is the same thing with
+none of the tells.
 
 ---
 

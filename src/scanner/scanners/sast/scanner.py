@@ -13,7 +13,10 @@ this scanner splits them: a directory that would not list and a file that would 
 open are failures, recorded with ``emit_failure`` so the run exits ``3``, because the
 answer for what they contained is not "clean" but "unknown". Oversized and binary
 files are declined on purpose and go to ``emit_skip``, aggregated, which does not
-move the exit code.
+move the exit code. A line too long to be worth matching is the same kind of
+deliberate decline one layer in, and gets the same treatment (D72) — for as long as
+it did not, a generated file that passed every one of the walk's filters was read and
+reported as a file containing nothing.
 
 An earlier version of this docstring claimed the errors were recorded when they were
 not, and that claim reached three other places before it was caught; it then said so
@@ -30,7 +33,7 @@ from scanner.core.config import DEFAULT_EXCLUDE_DIRS
 from scanner.core.finding import Confidence, Finding
 from scanner.core.registry import register
 from scanner.core.scanner import Requires, Scanner
-from scanner.scanners.sast.matcher import scan_text
+from scanner.scanners.sast.matcher import DEFAULT_MAX_LINE_LEN, scan_text
 from scanner.scanners.sast.walk import (
     INCOMPLETE_KINDS, WalkProblem, iter_source_files, read_text_file,
 )
@@ -75,6 +78,7 @@ class SastScanner(Scanner):
 
         root = ctx.target.code_path
         problems: list[WalkProblem] = []
+        unmatched: dict[str, int] = {}
         for path in iter_source_files(root, exclude_dirs=excludes, problems=problems):
             text, problem = read_text_file(path)
             if problem is not None:
@@ -82,14 +86,18 @@ class SastScanner(Scanner):
             if text is None:
                 continue
             display = self._display_path(path, root)
+            long_lines: list[int] = []
             for finding in await ctx.run_check(
-                "sast", display, self._scan_file(text, display, min_conf)
+                "sast", display, self._scan_file(text, display, min_conf, long_lines)
             ):
                 yield finding
+            if long_lines:
+                unmatched[display] = len(long_lines)
         # After the walk, because `problems` is a sink the generator fills as it
         # goes: it is only complete once iteration is. The engine drives this
         # generator to exhaustion, so this line is reached on every scan.
         self._report_problems(ctx, problems, root)
+        self._report_unmatched_lines(ctx, unmatched)
 
     def _report_problems(self, ctx, problems: list[WalkProblem], root) -> None:
         """Route each unread path to the channel that matches what happened to it.
@@ -120,8 +128,45 @@ class SastScanner(Scanner):
             )
 
     @staticmethod
-    async def _scan_file(text: str, display: str, min_conf: Confidence) -> list[Finding]:
-        return scan_text(text, path=display, min_confidence=min_conf)
+    def _report_unmatched_lines(ctx, unmatched: dict[str, int]) -> None:
+        """Say how much of the source the rules were never run against.
+
+        A line over ``DEFAULT_MAX_LINE_LEN`` is not examined, and until now that was
+        the one thing the walk's own policy declines were not: ``too-large`` and
+        ``binary`` files each produce an aggregated skip saying how many there were,
+        while a bundled ``app.js`` — text, under the size limit, one 2554-character
+        line — was read, walked past and reported as a file with nothing in it. The
+        same AWS key on a short line in the next file over was reported (D72).
+
+        Aggregated into one line for the reason the file-level declines are: nobody
+        chases an individual generated line, and a skip per line would bury the skips
+        that matter. Per-file counts are dropped for the same reason and because the
+        set of such files is, by construction, the set of generated ones.
+
+        A skip and not a failure: this is a bound the project chose, hit on ordinary
+        repositories, and a tool that exits 3 because a checkout contains a bundle has
+        spent exit 3 on nothing — ``walk``'s reasoning for keeping ``too-large`` out
+        of ``INCOMPLETE_KINDS``, one layer in.
+        """
+        if not unmatched:
+            return
+        lines = sum(unmatched.values())
+        files = len(unmatched)
+        ctx.emit_skip(
+            "sast",
+            f"{lines} line(s) across {files} file(s) were not matched against any "
+            f"rule because each is longer than {DEFAULT_MAX_LINE_LEN} characters — "
+            "generated or minified code. Nothing on those lines was looked for, so "
+            "their absence from the findings is not a clean result",
+            check="long-line",
+        )
+
+    @staticmethod
+    async def _scan_file(text: str, display: str, min_conf: Confidence,
+                         long_lines: list[int]) -> list[Finding]:
+        return scan_text(
+            text, path=display, min_confidence=min_conf, long_lines=long_lines,
+        )
 
     @staticmethod
     def _display_path(path, root) -> str:
