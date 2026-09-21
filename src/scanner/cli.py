@@ -17,11 +17,17 @@ Exit codes (decisions.md D14, extended by D54):
   at or above the threshold is the more actionable fact and keeps the code it
   has always had.
 
-``0`` is the absence of a recorded error, which is weaker than "every check ran":
-the active tier's request-budget exhaustion is only a log warning, and a file that
-cannot be read is skipped without a record, so both are invisible here. D54 names
-both gaps and defers the grading work that would close them. Do not read ``0`` as
-proof of coverage.
+``0`` is the absence of a recorded error, which is weaker than "every check ran".
+Work that was selected and then declined is a **skip**, and skips deliberately do
+not move the exit code: a crawl that stopped at its depth bound (D76), or a page
+whose POST forms were declined by default (D75), leaves findings unlooked-for and
+still exits ``0``. Read the report's skip list for coverage — the exit code grades
+what went wrong, not what was attempted. Do not read ``0`` as proof of coverage.
+
+The two gaps D54 named here are closed and no longer belong in that list: D67
+routes an unreadable file or unlistable directory to a recorded error (exit ``3``),
+and D61 discloses what the active request budget cut off rather than only logging
+it.
 
 Active/intrusive checks stay fail-closed. ``--active`` only requests them; they
 run only when the authorization is acknowledged (``--i-am-authorized`` or config)
