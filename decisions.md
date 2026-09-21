@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 569 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 577 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1917,6 +1917,90 @@ The lesson is narrower than "document things": when a document is checked agains
 code, check it by structure and not by list, because a list is written by whoever
 already knows what is wrong, and the next drift will be somewhere they were not
 looking.
+
+### D69 — One unparseable manifest cancelled the whole dependency scan
+
+**The guard was at the wrong altitude.** `_resolve` read and parsed every
+manifest in the tree inside one unguarded loop, and the only `try` was the one
+wrapping the call to `_resolve` itself. So a single `pyproject.toml` with a
+missing bracket raised `TOMLDecodeError` out of the loop, out of `_resolve`,
+into `scan`'s `except Exception`, and `scan` returned. Measured on a two-manifest
+tree: a valid `requirements.txt` beside a broken `pyproject.toml` in a
+subdirectory produced **zero findings** — the unpinned dependencies in the file
+that parsed perfectly well were never reported, because a different file failed.
+
+**The second casualty was the coverage report, which is the worse one.** Both
+`run_check` calls sit below that `return`, so the failure took out the no-manifest
+check, the unsupported-ecosystem check and the unpinned check along with the OSV
+query. The comment two lines above the wreckage reads "an OSV outage must not
+also erase the record of which manifests went unread. Those are independent facts
+and they fail independently" — which was true of the two checks and false of
+everything upstream of them. Splitting the checks apart is no use while a single
+exception can prevent both from being reached.
+
+**This is not the D42 silence bug; it is worse behaved than silence in one way
+and better in another.** The run did exit 3 and did print an error, so nobody was
+told a lie — but the error said `sca/discovery`, naming neither the file at fault
+nor the far larger set of dependencies that went unchecked as collateral. A
+reader could not tell from it that anything other than discovery had been lost.
+Failure now lands per manifest: each unreadable or unparseable file is recorded
+against its own relative path, the loop continues, and both checks run. The
+`except Exception` around `_resolve` stays as the backstop beneath it.
+
+**The `except` on the parse is deliberately not narrowed to the decoder
+errors.** `tomllib.TOMLDecodeError` and `json.JSONDecodeError` are what these
+parsers raise on the malformed input somebody meant to write; hostile or merely
+strange input gets whatever the stdlib feels like throwing — a `KeyError` on a
+lockfile shaped wrong, a `RecursionError` on a deeply nested one, a
+`UnicodeDecodeError`. Every type omitted from a narrow tuple re-opens exactly the
+hole the guard exists to close, and the cost of catching too much here is one
+extra line in an error list.
+
+**`supported_count` still counts a manifest that failed.** It drives the
+"no dependency manifest found" finding, and a tree where the one manifest present
+could not be read is not a tree with no manifests. Both facts are now stated,
+each on its own channel: the manifest's existence suppresses the no-manifest
+finding, and its failure appears in the errors.
+
+**`discover` was walking with no `onerror`, so this was the D67 defect one
+scanner over.** `os.walk` swallows every error it meets unless told not to, which
+makes a directory the OS refuses to list identical to an empty one; every
+manifest beneath it vanished from the result without a word. Measured against a
+directory stripped of its ACL: the old walk found one manifest of two and
+reported nothing, the new one finds the same one and names the directory it could
+not enter. Problems come back on the `Discovery` result here rather than through
+a sink argument as in the SAST walk, because this function is not a generator —
+it can simply return them.
+
+**Every kind escalates, which is the difference from D67.** That walk had to
+separate the machine refusing us from policy declining a minified bundle, because
+a tool that exits 3 on meeting a vendored asset has spent exit 3 on nothing. SCA
+has no policy-declined kind to separate: the manifests deliberately not parsed
+are already `CoverageGap`s and already become findings. `unlistable-dir`,
+`unreadable-file` and `unparseable` all mean the dependency set is smaller than
+it looks, so all three are failures.
+
+**Ten mutations, ten red runs.** Dropping `onerror` again, removing each of the
+two guards, collecting problems and never emitting them, dropping `discover`'s
+problems on the floor, routing failures to `emit_skip` where they would not touch
+the exit code, turning the `continue` into a `break` so the isolation exists but
+aborts the loop anyway, reporting every problem under one kind, counting an
+excluded `node_modules` as a failure, and subtracting failures from
+`supported_count`. The first attempt at two of those produced a `SyntaxError`
+rather than unguarded code, which measures the parser and not the tests; both
+were rewritten to compile and re-verified, and the harness now compiles each
+mutation before trusting its result. Suite 569 to 577.
+
+**Why:** Fault isolation is not a property of having a `try` somewhere; it is a
+property of where. One `except Exception` at the top of a scanner reads as
+thorough and produces the coarsest possible failure — the blast radius of any one
+error becomes the whole scanner, including every check that had already succeeded
+and every file that would have. The tell was in the source the whole time: a
+comment justifying why two checks are kept independent, sitting directly above a
+handler that could erase both. When the reason for a design is written down next
+to code that defeats it, the comment is the bug report.
+
+---
 
 ---
 

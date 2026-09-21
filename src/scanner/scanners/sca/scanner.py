@@ -11,16 +11,24 @@ to the database's qualitative rating, then to HIGH (a known-vulnerable dependenc
 is inherently notable). A fix is offered only when a fixed version above the
 installed one exists; a dependency bump is the one code-adjacent change policy
 allows to be marked auto-applicable (decisions.md D12/D18).
+
+Failure is isolated per manifest. A file that cannot be read or parsed is recorded
+against its own path and the walk continues, so the readable manifests are still
+checked and the coverage report is still produced; the record lands on
+``ctx.errors``, which puts the run at exit 3. The single scan-level handler that
+used to be the only guard remains as the backstop beneath it (D69).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
 from scanner.core.config import DEFAULT_EXCLUDE_DIRS
+from scanner.core.context import why_exception
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.fix import Fix, FixKind
 from scanner.core.location import Location
@@ -36,6 +44,7 @@ from scanner.scanners.sca.cvss import base_score, score_to_severity
 from scanner.scanners.sca.manifests import (
     CoverageGap,
     Dependency,
+    ManifestProblem,
     discover,
     parse_manifest,
     pyproject_coverage_gap,
@@ -53,6 +62,15 @@ _DB_SEVERITY = {
     "MEDIUM": Severity.MEDIUM,
     "LOW": Severity.LOW,
 }
+
+
+def _display_path(path, root) -> str:
+    """Path relative to the scanned root when possible, else the raw path — keeps
+    reported paths readable without leaking the machine's directory layout."""
+    try:
+        return str(Path(path).relative_to(root))
+    except (ValueError, TypeError):
+        return str(path)
 
 
 def _parse_version(value: str) -> Version | None:
@@ -148,6 +166,10 @@ class _Resolved:
     deps: list[Dependency] = field(default_factory=list)
     gaps: list[CoverageGap] = field(default_factory=list)
     supported_count: int = 0
+    #: Manifests that could not be read or parsed. ``supported_count`` still counts
+    #: them, because "a manifest is here and we failed on it" must not be reported
+    #: as "this project declares no dependencies".
+    problems: list[ManifestProblem] = field(default_factory=list)
 
 
 @register
@@ -165,6 +187,15 @@ class ScaScanner(Scanner):
             return
         if resolved is None:      # switched off in config — an explicit choice
             return
+        # Reported and then carried on past, which is the whole point: one manifest
+        # nobody can read is a hole in the dependency set, not a reason to abandon
+        # the manifests that *are* readable or the coverage report about them (D69).
+        for problem in resolved.problems:
+            ctx.emit_failure(
+                "sca",
+                _display_path(problem.path, resolved.root),
+                f"{problem.kind}: {problem.detail}",
+            )
         # Two checks rather than one, because an OSV outage must not also erase
         # the record of which manifests went unread. Those are independent facts
         # and they fail independently.
@@ -221,16 +252,40 @@ class ScaScanner(Scanner):
         found = discover(root, exclude_dirs=excludes)
         deps: list[Dependency] = []
         gaps: list[CoverageGap] = list(found.gaps)
+        problems: list[ManifestProblem] = list(found.problems)
         for path in found.supported:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            # Per manifest, because the blast radius of a failure should be the
+            # file that caused it. This loop used to be unguarded, so a single
+            # unparseable pyproject.toml raised through the whole of scan() and
+            # took every other manifest and both checks down with it (D69).
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                problems.append(
+                    ManifestProblem(str(path), "unreadable-file", why_exception(exc))
+                )
+                continue
             if path.name == "pyproject.toml":
                 gap = pyproject_coverage_gap(str(path), text)
                 if gap is not None:
                     gaps.append(gap)
-            for dep in parse_manifest(str(path), text):
+            try:
+                parsed = parse_manifest(str(path), text)
+            except Exception as exc:
+                # Deliberately not narrowed to the decoder errors. Hostile or
+                # merely odd input reaches these parsers as whatever the stdlib
+                # feels like raising -- a KeyError on a lockfile shaped wrong, a
+                # RecursionError on a deep one -- and every type left out of a
+                # narrow tuple re-opens exactly the hole this guard exists to
+                # close. scan()'s own handler stays as the backstop above it.
+                problems.append(
+                    ManifestProblem(str(path), "unparseable", why_exception(exc))
+                )
+                continue
+            for dep in parsed:
                 if dep.ecosystem in ecosystems:
                     deps.append(dep)
-        return _Resolved(root, deps, gaps, len(found.supported))
+        return _Resolved(root, deps, gaps, len(found.supported), problems)
 
     def _to_finding(self, dep, cluster: list[Vulnerability]) -> Finding:
         rep = _representative(cluster)

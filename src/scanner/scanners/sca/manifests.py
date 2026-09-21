@@ -14,6 +14,10 @@ Out of scope is not the same as invisible. Every manifest recognized-but-unparse
 comes back as a :class:`CoverageGap` so the scanner can say which ecosystems went
 unread, instead of returning the empty list that a genuinely clean project returns
 (decisions.md D42).
+
+Neither is *unreadable* the same as either of those. A directory the OS refuses to
+list holds manifests this module will never see, and it used to drop them without a
+word; those come back as :class:`ManifestProblem` for the caller to report (D69).
 """
 
 from __future__ import annotations
@@ -22,8 +26,10 @@ import json
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from scanner.core.context import why_exception
 
 _MANIFEST_NAMES = frozenset(
     {"requirements.txt", "pyproject.toml", "package.json", "package-lock.json"}
@@ -96,11 +102,32 @@ class CoverageGap:
 
 
 @dataclass(frozen=True)
+class ManifestProblem:
+    """A manifest, or a whole directory of them, that could not be read at all.
+
+    Distinct from :class:`CoverageGap` in the way that matters to a reader: a gap
+    is a decision this tool made and can describe ("Cargo is out of scope"), while
+    a problem is the tool being stopped. Gaps become findings; problems become
+    entries on ``ctx.errors``, which is what moves the run to exit 3.
+
+    ``kind`` is one of ``unlistable-dir``, ``unreadable-file`` or ``unparseable``.
+    Unlike the SAST walk's equivalent there is no subset of these that the caller
+    may ignore: every one of them means a dependency set is smaller than it looks.
+    """
+
+    path: str
+    kind: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class Discovery:
-    """The result of one tree walk: what can be parsed, and what cannot."""
+    """The result of one tree walk: what can be parsed, what cannot, and what
+    could not even be looked at."""
 
     supported: list[Path]
     gaps: list[CoverageGap]
+    problems: list[ManifestProblem] = field(default_factory=list)
 
 
 # --- name normalization ---
@@ -282,11 +309,27 @@ def discover(root, exclude_dirs=()) -> Discovery:
     Excluded directories are pruned for both halves: a ``composer.json`` vendored
     under ``node_modules`` is somebody else's dependency, and reporting it as a
     coverage gap in *this* project would be noise.
+
+    ``os.walk`` swallows every error it meets unless given ``onerror``, so without
+    one a directory the OS will not list is indistinguishable from an empty one and
+    every manifest below it disappears from the result (D69). Problems come back on
+    the result rather than through a sink argument, which is the difference between
+    this function and the SAST walk: that one is a generator, so a returned value
+    would arrive only after its caller stopped iterating.
     """
     exclude = set(exclude_dirs or ())
     supported: list[Path] = []
     gaps: list[CoverageGap] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    problems: list[ManifestProblem] = []
+
+    def _unlistable(err: OSError) -> None:
+        problems.append(ManifestProblem(
+            str(getattr(err, "filename", None) or root),
+            "unlistable-dir",
+            why_exception(err),
+        ))
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_unlistable):
         dirnames[:] = [d for d in dirnames if d not in exclude]
         for fn in sorted(filenames):
             if _is_manifest(fn):
@@ -298,14 +341,15 @@ def discover(root, exclude_dirs=()) -> Discovery:
                 gaps.append(
                     CoverageGap(ecosystem, label, str(Path(dirpath) / fn), checked)
                 )
-    return Discovery(supported, gaps)
+    return Discovery(supported, gaps, problems)
 
 
 def discover_manifests(root, exclude_dirs=()) -> list[Path]:
     """Walk ``root`` for recognized manifests, pruning ``exclude_dirs`` by name.
 
-    The narrow "what can I parse" view of :func:`discover`, kept because that is
-    all most callers want. Anything that also has to report what it skipped wants
-    ``discover`` instead.
+    The narrow "what can I parse" view of :func:`discover`. It discards both the
+    coverage gaps *and* the problems, so a caller using this cannot tell a tree
+    with no manifests from one it was not allowed to read. Nothing in the scanner
+    calls it for that reason; anything that reports coverage wants ``discover``.
     """
     return discover(root, exclude_dirs).supported

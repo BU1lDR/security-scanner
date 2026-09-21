@@ -1,7 +1,9 @@
 import json
+import os
 
 from scanner.scanners.sca.manifests import (
     Dependency,
+    discover,
     discover_manifests,
     parse_manifest,
     parse_package_json,
@@ -114,3 +116,66 @@ def test_discover_manifests_walks_tree_and_skips_excluded_dirs(tmp_path):
 
     found = sorted(p.name for p in discover_manifests(tmp_path, exclude_dirs=["node_modules"]))
     assert found == ["package.json", "requirements.txt"]
+
+
+# ── what the walk could not reach (D69) ──
+
+def _refusing_scandir(monkeypatch, forbidden_name):
+    """Make ``os.scandir`` refuse one directory by name, the way a filesystem
+    would. Monkeypatched rather than chmod'd because no permission model behaves
+    the same on POSIX and Windows, and the branch under test is the ``onerror``
+    callback, not the OS."""
+    real = os.scandir
+
+    def fake(path=".", *args, **kwargs):
+        if os.path.basename(str(path).rstrip("\\/")) == forbidden_name:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", fake)
+
+
+def test_a_directory_that_will_not_list_is_reported_not_silently_skipped(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "requirements.txt").write_text("flask==1.0\n", encoding="utf-8")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "package.json").write_text('{"dependencies":{"x":"1.0.0"}}', encoding="utf-8")
+    _refusing_scandir(monkeypatch, "locked")
+
+    found = discover(tmp_path)
+
+    # The manifest under `locked` is genuinely gone from the result -- that part
+    # cannot be fixed. What the fix adds is that the result says so.
+    assert [p.name for p in found.supported] == ["requirements.txt"]
+    assert [p.kind for p in found.problems] == ["unlistable-dir"]
+    assert found.problems[0].path.endswith("locked")
+    assert "Permission denied" in found.problems[0].detail
+
+
+def test_a_readable_tree_reports_no_problems_at_all(tmp_path):
+    """The other direction. Without this, a `problems` list that was never
+    appended to would satisfy every assertion above it (D43)."""
+    (tmp_path / "requirements.txt").write_text("flask==1.0\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "package.json").write_text('{"dependencies":{}}', encoding="utf-8")
+
+    found = discover(tmp_path)
+
+    assert len(found.supported) == 2
+    assert found.problems == []
+
+
+def test_an_excluded_directory_is_not_a_problem(tmp_path):
+    """Pruning is a decision, not a failure: `node_modules` must not raise the
+    exit code of every scan that meets one."""
+    (tmp_path / "requirements.txt").write_text("flask==1.0\n", encoding="utf-8")
+    excluded = tmp_path / "node_modules"
+    excluded.mkdir()
+    (excluded / "package.json").write_text('{"dependencies":{}}', encoding="utf-8")
+
+    found = discover(tmp_path, exclude_dirs=["node_modules"])
+
+    assert [p.name for p in found.supported] == ["requirements.txt"]
+    assert found.problems == []
