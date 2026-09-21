@@ -18,6 +18,13 @@ unread, instead of returning the empty list that a genuinely clean project retur
 Neither is *unreadable* the same as either of those. A directory the OS refuses to
 list holds manifests this module will never see, and it used to drop them without a
 word; those come back as :class:`ManifestProblem` for the caller to report (D69).
+
+And a manifest can be found, opened and parsed and still have declarations in it that
+this module cannot turn into a dependency: a ``-r other.txt`` pointing at a whole
+second file, a ``pkg @ https://...`` direct reference, a local wheel path. Every one
+of those used to leave by a bare ``continue``, so a ``requirements.txt`` whose entries
+were mostly URLs produced the dependency list of a nearly empty file. They come back
+as :class:`UnresolvedDeclaration` (D74).
 """
 
 from __future__ import annotations
@@ -121,6 +128,39 @@ class ManifestProblem:
 
 
 @dataclass(frozen=True)
+class UnresolvedDeclaration:
+    """A line in a manifest we *did* parse that did not become a dependency.
+
+    The three records above are all about whole files. This one is a layer in, and
+    it is the layer where a dependency set quietly shrinks: ``requirements.txt`` is
+    a supported manifest, so it is discovered, read and parsed without complaint,
+    and then every line the PEP 508 parser cannot handle leaves by a ``continue``.
+    A file of six declarations came back as two dependencies and the report said
+    two was all the file declared (D74).
+
+    ``kind`` is a stable slug; :mod:`coverage` owns the sentence for each. ``line``
+    is ``None`` for ``pyproject.toml``, where the declarations come out of a TOML
+    table that carries no line numbers.
+
+    There is deliberately no field for the line's text. A requirements line is
+    exactly the place a credential shows up — ``--index-url
+    https://user:token@pypi.internal/simple``, a ``-r`` whose argument is an
+    authenticated URL — and this record's whole purpose is to be printed in a
+    report. The line number is the pointer; the operator has the file.
+
+    ``ecosystem`` is carried so the caller can drop these under the same
+    ``sca.ecosystems`` filter it applies to :class:`Dependency`. Without it, an
+    operator who switched PyPI off would get a finding about the PyPI declarations
+    in a file they had excluded from the scan.
+    """
+
+    ecosystem: str
+    manifest: str
+    kind: str
+    line: int | None = None
+
+
+@dataclass(frozen=True)
 class Discovery:
     """The result of one tree walk: what can be parsed, what cannot, and what
     could not even be looked at."""
@@ -169,32 +209,111 @@ def _exact_npm(spec: str) -> str | None:
     return None
 
 
+# --- what a line was, when it was not a dependency ---
+
+#: pip options that pull in dependency declarations this parser then never sees,
+#: mapped to the slug each is recorded under.
+#:
+#: The split is the point of the table. Every *other* option — ``--index-url``,
+#: ``--find-links``, ``--hash``, ``--no-binary`` — configures how pip installs and
+#: declares no dependency at all, so recording one would claim a coverage gap where
+#: there is none, and a ``requirements.txt`` of index configuration would report
+#: itself as half-unread. Same reasoning as the SAST walk's split between media it
+#: declines silently and generated text it declines out loud (D73).
+_DEPENDENCY_OPTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("-r", "--requirement", "-c", "--constraint"), "requirement-file"),
+    (("-e", "--editable"), "editable-install"),
+)
+
+
+def _option_kind(line: str) -> str | None:
+    """Which slug an option line is recorded under, or ``None`` to ignore it."""
+    token = re.split(r"[\s=]", line, maxsplit=1)[0]
+    # pip lets a short option's argument be attached (``-rbase.txt``), so for those
+    # the first two characters are the whole option.
+    short = token if token.startswith("--") else token[:2]
+    for options, kind in _DEPENDENCY_OPTIONS:
+        if token in options or short in options:
+            return kind
+    return None
+
+
+def _unresolved_kind(spec: str) -> str:
+    """Why a non-comment, non-option declaration did not become a dependency."""
+    if "://" in spec or " @ " in spec:
+        return "direct-reference"
+    if spec.endswith((".whl", ".tar.gz", ".tgz", ".zip")) or spec.startswith(
+        (".", "/", "~", "\\")
+    ):
+        return "local-artifact"
+    return "unrecognized"
+
+
 # --- per-format parsers ---
 
-def parse_requirements_txt(text: str, manifest: str) -> list[Dependency]:
+def parse_requirements_txt(
+    text: str,
+    manifest: str,
+    *,
+    unresolved: list[UnresolvedDeclaration] | None = None,
+) -> list[Dependency]:
+    """Parse ``text`` as a pip requirements file into exact-where-known dependencies.
+
+    ``unresolved`` is an optional sink for the declarations that did not make it,
+    following ``iter_source_files``' argument rather than a wider return type for the
+    same reason: the return value is consumed by a dozen call sites that want a
+    ``list[Dependency]``, and widening it to a tuple would rewrite all of them to
+    carry a list that is usually empty. Passing nothing drops the reasons, which is
+    what every caller did before D74 and is why nothing ever reported them.
+    """
     deps: list[Dependency] = []
+    sink = unresolved if unresolved is not None else []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = re.sub(r"\s+#.*$", "", raw).strip()   # strip inline comment
-        if not line or line.startswith(("#", "-")):
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-"):
+            kind = _option_kind(line)
+            if kind is not None:
+                sink.append(UnresolvedDeclaration("PyPI", manifest, kind, lineno))
             continue
         parsed = _parse_pep508(line)
         if parsed is None:
+            sink.append(
+                UnresolvedDeclaration("PyPI", manifest, _unresolved_kind(line), lineno)
+            )
             continue
         name, version = parsed
         deps.append(Dependency("PyPI", _normalize_pypi(name), version, manifest, lineno))
     return deps
 
 
-def parse_pyproject(text: str, manifest: str) -> list[Dependency]:
+def parse_pyproject(
+    text: str,
+    manifest: str,
+    *,
+    unresolved: list[UnresolvedDeclaration] | None = None,
+) -> list[Dependency]:
+    """Parse the PEP 621 ``[project]`` tables. ``unresolved`` as above.
+
+    Entries here get no line number: ``tomllib`` hands back values, not positions.
+    A ``[project.dependencies]`` table holds nothing but requirement strings, so
+    anything the PEP 508 parser refuses is a declaration and not configuration —
+    there is no equivalent of the option split ``requirements.txt`` needs.
+    """
     data = tomllib.loads(text)
     project = data.get("project", {})
     specs: list[str] = list(project.get("dependencies", []) or [])
     for group in (project.get("optional-dependencies", {}) or {}).values():
         specs.extend(group or [])
     deps: list[Dependency] = []
+    sink = unresolved if unresolved is not None else []
     for spec in specs:
         parsed = _parse_pep508(spec)
         if parsed is None:
+            sink.append(
+                UnresolvedDeclaration("PyPI", manifest, _unresolved_kind(spec))
+            )
             continue
         name, version = parsed
         deps.append(Dependency("PyPI", _normalize_pypi(name), version, manifest))
@@ -244,18 +363,34 @@ def parse_package_lock(text: str, manifest: str) -> list[Dependency]:
 
 # --- dispatch + discovery ---
 
-def parse_manifest(filename: str, text: str) -> list[Dependency]:
+def parse_manifest(
+    filename: str,
+    text: str,
+    *,
+    unresolved: list[UnresolvedDeclaration] | None = None,
+) -> list[Dependency]:
+    """Dispatch on the manifest's basename. ``unresolved`` is forwarded where it
+    applies, which is the two PEP 508 formats.
+
+    The npm formats do not fill it, and that is not an omission. ``package.json``
+    carries an unresolvable spec through as ``version=None``, which
+    ``unpinned_findings`` already reports, so a second channel would say the same
+    thing twice. ``package-lock.json`` skips the entries with no ``node_modules/``
+    in their path and the ones with no version, and both of those are local
+    workspace packages rather than registry releases — nothing OSV has an advisory
+    for, so nothing whose absence overstates the scan's coverage.
+    """
     base = os.path.basename(filename)
     if base == "package-lock.json":
         return parse_package_lock(text, filename)
     if base == "package.json":
         return parse_package_json(text, filename)
     if base == "pyproject.toml":
-        return parse_pyproject(text, filename)
+        return parse_pyproject(text, filename, unresolved=unresolved)
     if base == "requirements.txt" or (
         base.startswith("requirements") and base.endswith(".txt")
     ):
-        return parse_requirements_txt(text, filename)
+        return parse_requirements_txt(text, filename, unresolved=unresolved)
     return []
 
 

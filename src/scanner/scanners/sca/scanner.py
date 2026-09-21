@@ -17,6 +17,13 @@ against its own path and the walk continues, so the readable manifests are still
 checked and the coverage report is still produced; the record lands on
 ``ctx.errors``, which puts the run at exit 3. The single scan-level handler that
 used to be the only guard remains as the backstop beneath it (D69).
+
+A declaration inside a manifest that *did* parse is neither of those. It is not an
+error — nothing was refused — and it is not the whole file going unread, so it
+travels as its own list and becomes an INFO coverage finding alongside the four
+D42 established. Until D74 it travelled as nothing at all: the dependency set
+shrank, the report's own count shrank with it, and both looked like the file's
+content rather than the parser's reach.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from scanner.core.scanner import Requires, Scanner
 from scanner.scanners.sca.coverage import (
     no_manifest_finding,
     unpinned_findings,
+    unresolved_declaration_findings,
     unsupported_manifest_findings,
 )
 from scanner.scanners.sca.cvss import base_score, score_to_severity
@@ -45,6 +53,7 @@ from scanner.scanners.sca.manifests import (
     CoverageGap,
     Dependency,
     ManifestProblem,
+    UnresolvedDeclaration,
     discover,
     parse_manifest,
     pyproject_coverage_gap,
@@ -170,6 +179,11 @@ class _Resolved:
     #: them, because "a manifest is here and we failed on it" must not be reported
     #: as "this project declares no dependencies".
     problems: list[ManifestProblem] = field(default_factory=list)
+    #: Declarations inside manifests that *did* parse and that did not resolve to a
+    #: package and a version. Separate from ``problems``: the file was read fine, so
+    #: this is a gap in what the parser understands rather than the tool being
+    #: stopped, and gaps are findings while problems are errors (D74).
+    unresolved: list[UnresolvedDeclaration] = field(default_factory=list)
 
 
 @register
@@ -212,6 +226,7 @@ class ScaScanner(Scanner):
             findings.append(no_manifest_finding(res.root))
         findings.extend(unsupported_manifest_findings(res.gaps, res.root))
         findings.extend(unpinned_findings(res.deps, res.root))
+        findings.extend(unresolved_declaration_findings(res.unresolved, res.root))
         return findings
 
     async def _analyze(self, ctx, res: _Resolved) -> list[Finding]:
@@ -253,6 +268,7 @@ class ScaScanner(Scanner):
         deps: list[Dependency] = []
         gaps: list[CoverageGap] = list(found.gaps)
         problems: list[ManifestProblem] = list(found.problems)
+        unresolved: list[UnresolvedDeclaration] = []
         for path in found.supported:
             # Per manifest, because the blast radius of a failure should be the
             # file that caused it. This loop used to be unguarded, so a single
@@ -270,7 +286,7 @@ class ScaScanner(Scanner):
                 if gap is not None:
                     gaps.append(gap)
             try:
-                parsed = parse_manifest(str(path), text)
+                parsed = parse_manifest(str(path), text, unresolved=unresolved)
             except Exception as exc:
                 # Deliberately not narrowed to the decoder errors. Hostile or
                 # merely odd input reaches these parsers as whatever the stdlib
@@ -285,7 +301,18 @@ class ScaScanner(Scanner):
             for dep in parsed:
                 if dep.ecosystem in ecosystems:
                     deps.append(dep)
-        return _Resolved(root, deps, gaps, len(found.supported), problems)
+        return _Resolved(
+            root,
+            deps,
+            gaps,
+            len(found.supported),
+            problems,
+            # Under the same filter the dependencies get. An operator who switched
+            # PyPI off has excluded requirements.txt from the scan, and a finding
+            # about the declarations in it that did not resolve would be a coverage
+            # gap reported against a file nobody asked us to cover.
+            [u for u in unresolved if u.ecosystem in ecosystems],
+        )
 
     def _to_finding(self, dep, cluster: list[Vulnerability]) -> Finding:
         rep = _representative(cluster)

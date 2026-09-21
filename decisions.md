@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 600 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 618 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2275,6 +2275,74 @@ loop was making the largest silent exception to it. The bound itself is right �
 matching 17 regexes against generated output buys nothing — but "we chose not to read
 this" and "there is nothing in this" are different statements, and only one of them
 was reaching the operator. Suite 595 to 600.
+
+---
+
+### D74 — A dependency on a line the parser could not read went unreported and uncounted
+
+**Four coverage gaps were about files and the fifth was inside one.** D42 established
+that SCA must never answer "we could not look" with the output of "we looked and there
+is nothing here", and it closed four holes: an unrecognized manifest dropped at
+discovery, a project with no manifest at all, a dependency pinned to a range, and a
+Poetry `pyproject.toml` that parses cleanly to zero dependencies. Every one of those is
+decided about a whole file, during the walk or immediately after a parse. One layer
+further in, `parse_requirements_txt` loops over the lines of a file that was found,
+opened and parsed without complaint, and each line it cannot turn into a name and a
+version leaves by a bare `continue`. `-r base.txt`, `pkg @ https://...`,
+`git+https://...#egg=pkg`, `./wheels/tool-1.0.whl` — all gone, with nothing anywhere
+saying so.
+
+**Measured on a seven-line file.** A pin, a `-r`, a URL reference, a VCS reference, a
+wheel path, an `--index-url` and a range. The report named one package, and the
+`unpinned-dependency` finding said *"1 of 2 dependencies declared in
+requirements.txt"* — so the file's own coverage gap arrived in the report as a
+statement about the file's contents. The `-r base.txt` was the worst of it: `base.txt`
+is not named `requirements*.txt`, so discovery never finds it either, and the
+`flask==0.12.2` inside it went unreported by both halves of the scan.
+
+**A finding, not an error, because nothing was refused.** `ManifestProblem` exists for
+a manifest the tool was stopped on and lands on `ctx.errors`, which moves the run to
+exit 3. This is the opposite situation: the file read perfectly and the limit is the
+parser's reach. So `UnresolvedDeclaration` travels as its own list and becomes one
+INFO/CONFIRMED finding per manifest, alongside the four D42 built — the convention
+this scanner already had, rather than a second one invented next to it.
+
+**The option split is what keeps it from being noise.** Only `-r`, `-c`, `-e` and
+their long forms pull in declarations this parser then never sees. `--index-url`,
+`--find-links`, `--hash` and `--no-binary` configure how pip installs and declare no
+dependency at all, so recording them would put a coverage gap on almost every real
+requirements file and teach people to skip the line. Same three-way discipline as D73's
+split between media declined silently and generated text declined out loud. The npm
+parsers fill nothing, also deliberately: `package.json` already carries an unresolvable
+spec through as `version=None` for `unpinned_findings` to report, and
+`package-lock.json` skips only local workspace entries, which OSV has no advisory for.
+
+**The record carries a line number and never the line.** A requirements file is
+exactly where a credential turns up — `--index-url https://user:token@pypi.internal/
+simple`, a `-r` whose argument is an authenticated URL — and this record's whole
+purpose is to be printed in a report a client reads. The number is the pointer and the
+operator has the file. The reasons are noun phrases for a smaller reason: "lines 3, 4
+points at a URL" is what a verb phrase gets you when one entry has to describe one line
+or five.
+
+**Seventh time a green test was pinning the defect.**
+`test_requirements_skips_comments_blanks_and_options` passed `-r base.txt` and `-e .`
+through and asserted only what came out, so a whole second file of dependencies
+vanishing through it was indistinguishable from a file declaring one package. A test
+that cannot tell "we looked and found nothing" from "we did not look" is not a complete
+assertion about a security check — D57, D66, D70, D71, D72 and D73 were each found the
+same way. Fifteen mutations confirm the eighteen new tests: dropping either half of the
+record, recording every option, collapsing each kind into the catch-all, dropping the
+ecosystem filter, forgetting the sink in either dispatch branch, restoring the old
+denominator, merging every manifest into one finding, losing the no-line-number phrase,
+losing the summary cap, carrying the raw line into the report, dropping the finding
+entirely, and reversing the phrase order. All fifteen fail.
+
+**Why:** The three records this module already had all answer "which file did we not
+read", and a dependency set does not only shrink a file at a time. The line-level
+`continue` was the last place where the number in the report was the number the parser
+managed rather than the number the project declared, and the two had been silently
+equated since v1. Suite 600 to 618.
 
 ---
 

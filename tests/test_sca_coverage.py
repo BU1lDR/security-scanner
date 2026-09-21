@@ -66,6 +66,7 @@ def _by_rule(findings, rule_id):
 _UNSUPPORTED = "sca.coverage.unsupported-manifest"
 _NO_MANIFEST = "sca.coverage.no-manifest"
 _UNPINNED = "sca.coverage.unpinned-dependency"
+_UNRESOLVED = "sca.coverage.unresolved-declaration"
 
 
 # --- unsupported manifests are named, not dropped ---------------------------
@@ -193,6 +194,7 @@ def test_supported_manifest_produces_no_coverage_noise(tmp_path):
     assert _by_rule(findings, _NO_MANIFEST) == []
     assert _by_rule(findings, _UNSUPPORTED) == []
     assert _by_rule(findings, _UNPINNED) == []
+    assert _by_rule(findings, _UNRESOLVED) == []
 
 
 # --- unpinned dependencies -------------------------------------------------
@@ -272,3 +274,153 @@ def test_resolved_deps_with_no_http_client_records_an_error(tmp_path):
     assert ctx.errors[0].scanner == "sca"
     assert "flask" in ctx.errors[0].message or "1 dependenc" in ctx.errors[0].message
     assert _by_rule(findings, _NO_MANIFEST) == []
+
+
+# --- declarations inside a manifest that parsed fine (D74) ------------------
+#
+# The four gaps above are all decided about a whole file, during discovery or
+# straight after a parse. This one is a loop over the lines of a file that was
+# found, opened and parsed without complaint, where every line the PEP 508 parser
+# could not handle left by a `continue`. A requirements.txt of a pin, a `-r`, two
+# URL references, a wheel path, an index option and a range reported two
+# dependencies and said the file declared two.
+
+
+def test_a_requirements_file_of_unresolvable_entries_is_not_reported_as_clean(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        "flask==2.0.1\n"
+        "-r base.txt\n"
+        "urllib3 @ https://files.pythonhosted.org/packages/urllib3-1.24.1.tar.gz\n"
+        "./wheels/tool-1.0-py3-none-any.whl\n",
+        encoding="utf-8",
+    )
+    # The file `-r` points at. Not named requirements*.txt, so discovery never sees
+    # it, and its pin is the one a reader would most want to know about.
+    (tmp_path / "base.txt").write_text("django==1.11\n", encoding="utf-8")
+
+    findings, ctx = _scan(tmp_path)
+
+    gaps = _by_rule(findings, _UNRESOLVED)
+    assert len(gaps) == 1
+    f = gaps[0]
+    assert f.severity is Severity.INFO
+    assert f.confidence is Confidence.CONFIRMED
+    assert f.location.kind is LocationKind.FILE
+    assert f.location.path.endswith("requirements.txt")
+    assert f.location.line == 2          # the first line that went unresolved
+    assert "3 declaration(s)" in f.evidence
+    assert "line 2 — another requirements file" in f.evidence
+    assert "line 3 — a URL or version-control checkout" in f.evidence
+    assert "line 4 — a local archive or wheel" in f.evidence
+    # Worst coverage loss first: a `-r` hides a whole second file of dependencies,
+    # a URL reference hides one package.
+    assert f.evidence.index("another requirements file") < f.evidence.index("a URL")
+    assert "not evidence" in f.remediation
+    # A gap the parser chose, on a file it read: a finding, never an error.
+    assert ctx.errors == []
+
+
+def test_pip_configuration_alone_reports_no_gap(tmp_path):
+    """The control that keeps the finding meaningful. Index and hash options are in
+    most real requirements files; a gap reported for them would appear on almost
+    every scan and be learned as background."""
+    (tmp_path / "requirements.txt").write_text(
+        "--index-url https://pypi.example.com/simple\n"
+        "--hash=sha256:abc\n"
+        "flask==2.0.1\n",
+        encoding="utf-8",
+    )
+
+    findings, _ = _scan(tmp_path)
+
+    assert _by_rule(findings, _UNRESOLVED) == []
+
+
+def test_the_unpinned_count_no_longer_passes_off_the_parsers_reach_as_the_file(tmp_path):
+    """Two findings about one file, and the numbers in them have to be consistent.
+    The unpinned evidence used to say "1 of 2 dependencies declared in
+    requirements.txt" about a file declaring five."""
+    (tmp_path / "requirements.txt").write_text(
+        "flask>=2.0\nrequests==2.31.0\n-r base.txt\ngit+https://e.com/x#egg=x\n",
+        encoding="utf-8",
+    )
+
+    findings, _ = _scan(tmp_path)
+
+    unpinned = _by_rule(findings, _UNPINNED)
+    assert len(unpinned) == 1
+    assert "1 of the 2 dependencies resolved from" in unpinned[0].evidence
+    assert "declared in" not in unpinned[0].evidence
+    assert len(_by_rule(findings, _UNRESOLVED)) == 1
+
+
+def test_unresolved_findings_are_grouped_per_manifest(tmp_path):
+    (tmp_path / "requirements.txt").write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["p @ https://e.com/p.whl"]\n',
+        encoding="utf-8",
+    )
+
+    gaps = _by_rule(_scan(tmp_path)[0], _UNRESOLVED)
+
+    assert len(gaps) == 2
+    names = sorted(f.location.path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] for f in gaps)
+    assert names == ["pyproject.toml", "requirements.txt"]
+    # No line numbers come out of a TOML table, so the phrase has to work without one.
+    toml = next(f for f in gaps if f.location.path.endswith("pyproject.toml"))
+    assert "an entry — a URL or version-control checkout" in toml.evidence
+    assert toml.location.line is None
+
+
+def test_switching_pypi_off_does_not_report_its_unresolved_declarations(tmp_path):
+    """Under the same filter the dependencies get. An operator who excluded PyPI has
+    excluded requirements.txt, and a coverage gap on a file nobody asked us to cover
+    is a gap in nothing."""
+    (tmp_path / "requirements.txt").write_text("-r base.txt\n", encoding="utf-8")
+    target = Target(code_path=str(tmp_path))
+    ctx = ScanContext(
+        target=target,
+        scope=target.scope,
+        http=_FakeHttp(),
+        config=Config.from_dict({"sca": {"ecosystems": ["npm"]}}),
+    )
+
+    async def run():
+        return [f async for f in ScaScanner().scan(ctx)]
+
+    assert _by_rule(asyncio.run(run()), _UNRESOLVED) == []
+
+
+def test_a_long_run_of_line_numbers_is_summarized_not_listed_in_full(tmp_path):
+    """``_listed`` was written to cap a list of package names and is reused here for
+    line numbers. Eight URL references is a plausible vendored requirements file and
+    a report is read by a person."""
+    (tmp_path / "requirements.txt").write_text(
+        "".join(f"pkg{n} @ https://e.com/pkg{n}.whl\n" for n in range(8)),
+        encoding="utf-8",
+    )
+
+    gaps = _by_rule(_scan(tmp_path)[0], _UNRESOLVED)
+
+    assert len(gaps) == 1
+    assert "8 declaration(s)" in gaps[0].evidence
+    assert "lines 1, 2, 3, 4, 5, 6 and 2 more" in gaps[0].evidence
+
+
+def test_the_finding_prints_the_line_number_and_never_the_line(tmp_path):
+    """A `-r` argument can be an authenticated URL and this text goes into a report
+    a client reads. The record carries no line text for that reason, and this is the
+    assertion that keeps it that way."""
+    (tmp_path / "requirements.txt").write_text(
+        "--index-url https://ci:s3cr3t-token@pypi.internal/simple\n"
+        "-r https://ci:s3cr3t-token@pypi.internal/reqs.txt\n",
+        encoding="utf-8",
+    )
+
+    gaps = _by_rule(_scan(tmp_path)[0], _UNRESOLVED)
+
+    assert len(gaps) == 1
+    assert "line 2" in gaps[0].evidence
+    for text in (gaps[0].evidence, gaps[0].remediation, gaps[0].title):
+        assert "s3cr3t-token" not in text
+        assert "pypi.internal" not in text

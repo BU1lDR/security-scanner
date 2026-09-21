@@ -3,6 +3,7 @@ import os
 
 from scanner.scanners.sca.manifests import (
     Dependency,
+    UnresolvedDeclaration,
     discover,
     discover_manifests,
     parse_manifest,
@@ -50,6 +51,169 @@ def test_requirements_skips_comments_blanks_and_options():
     )
     deps = parse_requirements_txt(text, "r.txt")
     assert deps == [Dependency("PyPI", "flask", "2.0", "r.txt", 6)]
+
+
+# ── the lines it skipped, which nothing recorded (D74) ────────────────────────
+#
+# The test above is the sixth green test found pinning a defect. It asserts what
+# came out and never what was left behind, so `-r base.txt` -- a whole second file
+# of dependencies -- passing through it silently is indistinguishable from a file
+# that declares only flask. Measured on a seven-line requirements.txt whose entries
+# were a pin, a `-r`, two URL references, a wheel path, an index option and a range:
+# the report named two dependencies and said the file declared two.
+
+
+def _kinds(unresolved):
+    return [(u.kind, u.line) for u in unresolved]
+
+
+def test_a_referenced_requirements_file_is_recorded_not_dropped():
+    unresolved = []
+    deps = parse_requirements_txt(
+        "flask==2.0\n-r base.txt\n-c constraints.txt\n", "r.txt",
+        unresolved=unresolved,
+    )
+    assert deps == [Dependency("PyPI", "flask", "2.0", "r.txt", 1)]
+    assert _kinds(unresolved) == [("requirement-file", 2), ("requirement-file", 3)]
+    assert all(u.manifest == "r.txt" and u.ecosystem == "PyPI" for u in unresolved)
+
+
+def test_pip_configuration_options_are_not_recorded_as_lost_coverage():
+    """The split that keeps this from being noise. These four change how pip
+    installs and declare no dependency at all, so recording them would report a
+    coverage gap on a file that has none."""
+    text = (
+        "--index-url https://pypi.example.com/simple\n"
+        "--find-links ./wheels\n"
+        "--hash=sha256:abc\n"
+        "--no-binary :all:\n"
+        "flask==2.0\n"
+    )
+    unresolved = []
+    deps = parse_requirements_txt(text, "r.txt", unresolved=unresolved)
+    assert [d.name for d in deps] == ["flask"]
+    assert unresolved == []
+
+
+def test_an_option_with_its_argument_attached_is_still_recognized():
+    """pip accepts ``-rbase.txt``. Matching on the whole token alone would file it
+    under "unrecognized", which is a true statement about the wrong thing."""
+    unresolved = []
+    parse_requirements_txt("-rbase.txt\n-cpins.txt\n-e.\n", "r.txt",
+                           unresolved=unresolved)
+    assert _kinds(unresolved) == [
+        ("requirement-file", 1), ("requirement-file", 2), ("editable-install", 3),
+    ]
+
+
+def test_a_direct_url_or_vcs_reference_is_recorded():
+    text = (
+        "urllib3 @ https://files.pythonhosted.org/packages/urllib3-1.24.1.tar.gz\n"
+        "git+https://github.com/psf/requests@v2.19.1#egg=requests\n"
+    )
+    unresolved = []
+    assert parse_requirements_txt(text, "r.txt", unresolved=unresolved) == []
+    assert _kinds(unresolved) == [("direct-reference", 1), ("direct-reference", 2)]
+
+
+def test_a_local_archive_path_is_recorded_as_such():
+    unresolved = []
+    parse_requirements_txt("./wheels/foo-1.0-py3-none-any.whl\n", "r.txt",
+                           unresolved=unresolved)
+    assert _kinds(unresolved) == [("local-artifact", 1)]
+
+
+def test_a_fully_pinned_file_records_nothing_unresolved():
+    """The other direction. A channel that reports a gap in every file reports
+    nothing about any of them."""
+    unresolved = []
+    deps = parse_requirements_txt(
+        "flask==2.0\n# comment\n\nrequests>=2.0\n", "r.txt", unresolved=unresolved
+    )
+    assert len(deps) == 2          # the range is carried through as version=None
+    assert unresolved == []
+
+
+def test_the_sink_is_optional_so_the_default_call_still_works():
+    """Every pre-D74 caller passed nothing and must keep working: the sink is a
+    report channel, not a control-flow one."""
+    assert parse_requirements_txt("-r base.txt\nflask==2.0\n", "r.txt") == [
+        Dependency("PyPI", "flask", "2.0", "r.txt", 2)
+    ]
+    assert parse_pyproject('[project]\ndependencies = ["x @ file:///x"]\n', "p.toml") == []
+
+
+def test_pyproject_records_unresolved_specs_with_no_line_number():
+    """``tomllib`` returns values, not positions, so there is no line to name. The
+    record still has to exist -- a PEP 621 table of URL references is the same hole."""
+    text = (
+        "[project]\n"
+        'name = "x"\n'
+        'dependencies = ["flask==2.0", "pkg @ https://example.com/pkg.tar.gz"]\n'
+        "\n"
+        "[project.optional-dependencies]\n"
+        'dev = ["./vendor/tool-1.0.whl"]\n'
+    )
+    unresolved = []
+    deps = parse_pyproject(text, "pyproject.toml", unresolved=unresolved)
+    assert [d.name for d in deps] == ["flask"]
+    assert _kinds(unresolved) == [("direct-reference", None), ("local-artifact", None)]
+
+
+def test_parse_manifest_forwards_the_sink_for_both_pep508_formats():
+    """The dispatcher is the only thing the scanner calls, so a sink it forgets to
+    pass is a sink that is never filled."""
+    for name, text in (
+        ("requirements.txt", "-r base.txt\n"),
+        ("requirements-dev.txt", "-r base.txt\n"),
+        ("pyproject.toml", '[project]\ndependencies = ["x @ https://e.com/x.whl"]\n'),
+    ):
+        unresolved = []
+        parse_manifest(name, text, unresolved=unresolved)
+        assert len(unresolved) == 1, name
+        assert unresolved[0].manifest == name
+
+
+def test_the_npm_formats_deliberately_fill_nothing():
+    """Not an omission. ``package.json`` carries an unresolvable spec through as
+    ``version=None``, which the unpinned finding already reports, and
+    ``package-lock.json`` skips only local workspace entries -- nothing OSV holds an
+    advisory for. A second channel here would duplicate one report and invent another.
+    """
+    unresolved = []
+    deps = parse_manifest(
+        "package.json", '{"dependencies": {"lodash": "^4.17.0"}}',
+        unresolved=unresolved,
+    )
+    assert [(d.name, d.version) for d in deps] == [("lodash", None)]
+    assert unresolved == []
+
+    unresolved = []
+    parse_manifest(
+        "package-lock.json",
+        json.dumps({"packages": {
+            "": {"name": "root"},
+            "packages/mylib": {"version": "1.0.0"},
+            "node_modules/mylib": {"link": True, "resolved": "packages/mylib"},
+            "node_modules/lodash": {"version": "4.17.21"},
+        }}),
+        unresolved=unresolved,
+    )
+    assert unresolved == []
+
+
+def test_the_record_carries_no_line_text_only_a_line_number():
+    """A requirements line is exactly where a credential turns up, and this record
+    exists to be printed in a report. The pointer is the number."""
+    unresolved = []
+    parse_requirements_txt(
+        "-r https://ci:s3cr3t-token@pypi.internal/reqs.txt\n", "r.txt",
+        unresolved=unresolved,
+    )
+    assert _kinds(unresolved) == [("requirement-file", 1)]
+    assert not hasattr(unresolved[0], "text")
+    assert "s3cr3t-token" not in repr(unresolved[0])
+    assert unresolved[0] == UnresolvedDeclaration("PyPI", "r.txt", "requirement-file", 1)
 
 
 # --- pyproject.toml (PEP 621) ---
