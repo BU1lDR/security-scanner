@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **`main` is the current build; `v1.3.1` is the newest tag and carries none of the work since it.** Tagging stopped after it, so the tag list is a history and not a pointer at the present — read this file and the code, not the Releases tab. All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 659 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 is superseded by v1.1.1 and v1.3.1 by `main`, and in both cases the release page itself says so rather than only this file.
+**Status:** **`main` is the current build; `v1.3.1` is the newest tag and carries none of the work since it.** Tagging stopped after it, so the tag list is a history and not a pointer at the present — read this file and the code, not the Releases tab. All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 668 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 is superseded by v1.1.1 and v1.3.1 by `main`, and in both cases the release page itself says so rather than only this file.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside. The claim is now gone from the line above rather than guarded, which is the cheaper answer: it names which *branch* is current, and that is derivable. Once tagging stopped, "v1.3.1 is the current release" beside a test count from twenty-six commits later was the same conflation the Releases tab was making — a name someone attached to an old commit, read as a description of the present.
 
@@ -2718,6 +2718,76 @@ tool report what it cannot read" but "at what granularity does it stop being abl
 to tell." Seven tests and six seeded mutations pin this layer; the parser's reach
 is still a declared scope rather than a guess, and the gap is what makes the scope
 legible from the report instead of only from this file.
+
+---
+
+### D81 — A rule named GITHUB_TOKEN did not match the GitHub token a reader holds
+
+**`GITHUB_TOKEN` recognized the 2021 `gh*_` scheme and not `github_pat_`.** GitHub
+publishes two token formats and has recommended the fine-grained personal access
+token over the classic kind since 2022, so the one format the constant missed is the
+one a reader is most likely to be holding. Eighty decisions shipped with
+`sast.secret.github-token` blind to it.
+
+**The false negative is the smaller half.** `core.redaction` feeds two callers: the
+rule pack, which uses the shapes to *find* credentials, and `core.finding`, which uses
+them to *scrub* text that should never have carried one — the last line of defence
+behind the `Finding.evidence` contract (§4). A sink rule quotes the offending source
+line verbatim, which is correct for a code scanner and is the reason `scrub` exists at
+all: a line like `os.system(f"curl -H 'Authorization: Bearer {token}' {url}")` produces
+two findings, and the secret rule masking its own half does nothing about the sink rule
+printing the whole line. With no pattern for `github_pat_`, that line put a live
+fine-grained PAT into the terminal, the JSON and the HTML report intact.
+
+**`tests/test_sast_matcher.py` already tested that exact pairing — with a classic
+token.** A test written to prevent a credential leak was passing while the leak it
+describes stayed reachable through the format the vendor recommends. That is the part
+worth carrying forward: a guard tested against one member of a family is not tested
+against the family, and the member a test author reaches for is the one they learned
+first rather than the one the reader has.
+
+**One pattern with an alternation, not a second constant.** `sast.secret.github-token`
+is the same finding either way, `scrub` has no reason to tell the two formats apart,
+and the rule count stays at seventeen, so nothing downstream shifts to accommodate a
+pattern that got wider.
+
+**The exactness of the length is the whole safety argument, so it is now asserted in
+both directions.** These shapes are safe to substitute blindly into arbitrary prose
+only because a vendor-published format has essentially no false positives; `+` in place
+of `{82}` would mask whatever word characters happened to follow. One character short
+of each published length was already asserted; one character *over* was not, so
+dropping the trailing `\b` survived a seeded mutation — the pattern would then match
+its exact length inside a longer run and mask the front of a string that is not a
+credential, which is the one thing the narrow-patterns bargain promises not to do. The
+gap was never specific to the new branch: the same assertion now covers the classic
+one, which had gone eighty decisions without it.
+
+**Idempotence is asserted per family, and a mutation corrected the reason given for
+it.** Evidence can cross more than one redaction layer and must not decay a little
+each time. Two independent things deliver that and the comment named only one:
+`redact` replaces the tail with `*`, which no character class here accepts, *and* it
+keeps four characters of prefix, which is shorter than every literal prefix in the
+table except `AKIA`. So no family with a prefix longer than four characters can
+re-match its own output even if its body were widened — the mutation that widened this
+one survived, and what had to change was the explanation, not the pattern.
+
+**One note on the evidence.** Of five seeded mutations four are killed by a named
+test and the fifth is equivalent rather than surviving, for the reason just given. The
+harness needed a correction before any of that could be believed: `{82}` to `{40}`
+leaves the file's byte length unchanged, so restoring it in the same second left
+`(mtime, size)` intact and Python reused the mutant's cached bytecode — the run meant
+to prove the file was restored reported the mutant's four failures instead. It clears
+`__pycache__` before every run now, because a harness that can silently test stale
+bytecode reports whatever it likes.
+
+**Why:** This module's docstring says `scrub` recognizes fixed-format token families
+and nothing else, and that is still the boundary — `sk-ant-`, `glpat-`, `npm_` and
+`pypi-` are absent because adding a vendor is detection scope, which is a feature and
+not an error. A second published format for a vendor already in the table, inside a
+constant named after that vendor, is not that boundary; it is the boundary drawn
+wrong. The distinction decides whether an omission gets a fix or a roadmap entry, and
+the one thing that must never be true of a redaction layer is that it is narrower than
+the name it goes by.
 
 ---
 

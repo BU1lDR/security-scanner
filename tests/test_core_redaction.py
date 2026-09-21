@@ -15,6 +15,12 @@ from scanner.core.redaction import (
 _SAMPLES = {
     "aws": "AKIAIOSFODNN7EXAMPLE",
     "github": "ghp_" + "a" * 36,
+    # GitHub's fine-grained PAT: the prefix, then 82 characters of [0-9A-Za-z_]
+    # carrying one underscore separator. Listed beside the classic format rather
+    # than folded into it because a reader checking this table against GitHub's
+    # published shapes should see both, and because the parametrized tests below
+    # take their coverage from this dict.
+    "github-pat": "github_pat_" + "a" * 22 + "_" + "b" * 59,
     "google": "AIza" + "b" * 35,
     "slack": "xoxb-123456789012",
     "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdef",
@@ -89,6 +95,40 @@ def test_scrub_does_not_mangle_high_entropy_but_harmless_values(value):
     trade some recall for never destroying a finding's diagnostic value.
     """
     assert scrub(f"evidence: {value}") == f"evidence: {value}"
+
+
+def test_both_github_token_formats_scrub_and_neither_widens_into_the_other():
+    # One pattern covers two published shapes, which is only safe if the length
+    # quantifiers are exact. A `+` or a `{36,}` on either branch would swallow
+    # arbitrary trailing word characters and mask evidence that is not a token.
+    classic, fine = _SAMPLES["github"], _SAMPLES["github-pat"]
+
+    assert scrub(f"a={classic} b={fine}").count("*") == 36 + 89
+    # One character short of each published length is not a token of that family.
+    assert scrub("ghp_" + "a" * 35) == "ghp_" + "a" * 35
+    assert scrub("github_pat_" + "a" * 81) == "github_pat_" + "a" * 81
+    # And one character over is not a token either, which is what the trailing \b
+    # buys: without it both branches match their exact length inside a longer run of
+    # word characters and mask the front of a string that is not a credential. The
+    # module's stated bargain is never to destroy legitimate evidence, so a run that
+    # merely starts like a token has to come back whole.
+    assert scrub("ghp_" + "a" * 37) == "ghp_" + "a" * 37
+    assert scrub("github_pat_" + "a" * 83) == "github_pat_" + "a" * 83
+
+
+@pytest.mark.parametrize("family", sorted(_SAMPLES))
+def test_scrub_is_idempotent_for_every_family(family):
+    # The property the module docstring rests on, asserted per family because it is
+    # each *pattern* that has to not match its own output. Two independent things
+    # deliver it and only one is obvious: redact() replaces the tail with `*`, which
+    # no character class here accepts, *and* it keeps only four characters of prefix,
+    # which is shorter than every literal prefix in the table except AWS's. So a
+    # family whose name is longer than four characters cannot re-match even if its
+    # body were widened, and `AKIA` survives on the character class alone.
+    once = scrub(f"key: {_SAMPLES[family]}")
+
+    assert _SAMPLES[family] not in once
+    assert scrub(once) == once
 
 
 def test_scrub_deliberately_keeps_the_private_key_header():

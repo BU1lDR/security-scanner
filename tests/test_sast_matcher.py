@@ -51,8 +51,8 @@ def test_secret_is_redacted_and_raw_value_never_leaks():
 def test_sink_rule_does_not_reprint_a_secret_the_secret_rule_redacted():
     """Redaction is per-rule, but a line is matched by *every* rule.
 
-    ``_match_line`` decides to redact from ``rule.redact``, and all eleven sink
-    rules set it to ``False`` because a line of code is normally safe to quote.
+    ``_match_line`` decides to redact from ``rule.redact``, and every sink rule
+    sets it to ``False`` because a line of code is normally safe to quote.
     But the matcher tries every applicable rule against every line, so one line
     can produce two findings that contradict each other: the secret rule masks
     the credential, and a sink rule on the same line prints it in full. The
@@ -73,6 +73,29 @@ def test_sink_rule_does_not_reprint_a_secret_the_secret_rule_redacted():
     for f in findings:
         assert token not in f.evidence, (
             f"{f.rule_id} leaked the token the secret rule redacted: {f.evidence!r}"
+        )
+
+
+def test_the_same_pairing_holds_for_a_fine_grained_personal_access_token():
+    """The test above, with the GitHub token format people actually hold now.
+
+    ``GITHUB_TOKEN`` matched only the 2021 ``gh*_`` scheme, so this line produced
+    the ``os.system`` finding with the credential printed in full and no secret
+    finding beside it. The pairing the test above guards was reachable the whole
+    time through the format GitHub has recommended since 2022 -- the one the
+    scanner had no pattern for.
+    """
+    token = "github_pat_" + "a" * 22 + "_" + "b" * 59
+    text = f"""os.system(f"curl -H 'Authorization: Bearer {token}' {{url}}")\n"""
+
+    findings = scan_text(text, path="deploy.py")
+
+    ids = _ids(findings)
+    assert "sast.secret.github-token" in ids, "the secret rule should fire"
+    assert "sast.sink.python-os-system" in ids, "the sink rule should fire"
+    for f in findings:
+        assert token not in f.evidence, (
+            f"{f.rule_id} printed a fine-grained PAT in full: {f.evidence!r}"
         )
 
 

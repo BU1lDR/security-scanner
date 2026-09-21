@@ -71,7 +71,19 @@ def looks_like_placeholder(value: str) -> bool:
 AWS_ACCESS_KEY = re.compile(
     r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b"
 )
-GITHUB_TOKEN = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b")
+#: Both of GitHub's token formats. ``gh[porsu]_`` is the 2021 prefixed scheme;
+#: ``github_pat_`` is the fine-grained personal access token, which GitHub has
+#: recommended over the classic kind since 2022 and is therefore the one a reader is
+#: most likely to be holding. The second was missing for eighty decisions, so a rule
+#: named GITHUB_TOKEN did not match the current default GitHub token — a false
+#: negative on the SAST side, and worse on the ``scrub`` side, where it meant a
+#: fine-grained PAT quoted in some other rule's evidence was printed into the report
+#: whole. One pattern rather than two: ``sast.secret.github-token`` is the same
+#: finding either way and ``scrub`` has no reason to tell them apart.
+GITHUB_TOKEN = re.compile(
+    r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}"
+    r"|github_pat_[0-9A-Za-z_]{82})\b"
+)
 GOOGLE_API_KEY = re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")
 SLACK_TOKEN = re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")
 JWT = re.compile(
