@@ -497,3 +497,44 @@ def test_redirect_hops_count_against_max_pages():
     result, http = _crawl("https://example.com/a", pages, max_pages=2)
     assert len(http.gets) == 2
     assert "truncated" in _kinds(result)
+
+
+# ---------------------------------------------------------------------------
+# dast.crawler.user_agent (D63). The key had a default, a fallback comment, a
+# documented table row and a line in contract 14 promising it "overrides it for
+# crawl traffic only if set". No code read it, by any route.
+
+
+class _RecordingHttp(_FakeHttp):
+    """Serves pages and records the headers each fetch was given."""
+
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.headers: list[dict | None] = []
+
+    async def get(self, url, **kwargs):
+        self.headers.append(kwargs.get("headers"))
+        return await super().get(url)
+
+
+def test_the_crawler_user_agent_is_sent_on_crawl_requests():
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp("leaf"),
+    }
+    http = _RecordingHttp(pages)
+    asyncio.run(crawl("https://example.com/", http, _scope("example.com"),
+                      user_agent="secscan-crawl/1.0 (+https://example.invalid)"))
+    assert len(http.headers) == 2
+    assert all(h == {"user-agent": "secscan-crawl/1.0 (+https://example.invalid)"}
+               for h in http.headers)
+
+
+def test_no_crawler_user_agent_means_the_client_identity_is_untouched():
+    """The other direction, and the reason this is a header and not a client
+    setting: unset must send no override at all, so http.user_agent -- the
+    identity the person being scanned sees -- keeps applying."""
+    pages = {"https://example.com/": _Resp("leaf")}
+    http = _RecordingHttp(pages)
+    asyncio.run(crawl("https://example.com/", http, _scope("example.com")))
+    assert http.headers == [None]

@@ -192,7 +192,7 @@ you have a specific need for it to be ambient.
 | `dast.crawler.max_depth` | `2` | Link depth from the entry URL. Redirects do not spend a level: a site that bounces its own root would otherwise arrive at its front page having used one of your two. |
 | `dast.crawler.max_pages` | `50` | Hard page ceiling. Every request counts, redirect hops included — a hop is traffic to someone else's machine, which is what this bounds. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
 | `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. Widens `scope.allowed_hosts` only — never `scope.active_allowlist`, so no probe reaches a host you did not name. Lookalikes are not subdomains: `notexample.com` stays out. |
-| `dast.crawler.user_agent` | unset | Overrides `http.user_agent` for crawl traffic only. Leave unset to use one identity throughout. |
+| `dast.crawler.user_agent` | unset | Overrides `http.user_agent` on the crawler's own GETs, and only those: the active tier's probes and the passive checks keep the default, so whoever you are scanning can separate reconnaissance from attack-shaped traffic in their access log. Leave unset to use one identity throughout, which is what the tool did in every version before this one — the key existed and nothing read it. |
 
 **Redirects are followed, and there is no setting for it.** The crawl and the
 passive checks both follow up to five hops, scope-checked like any other request,

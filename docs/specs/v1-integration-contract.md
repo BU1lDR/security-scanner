@@ -391,14 +391,36 @@ class Scanner(ABC):
 **Active gating (fail-closed, satisfies decisions.md D9):** a scanner whose
 `requires.active` is `True` is selected only if **all** hold:
 
-1. `dast.active.enabled` is `True` (set only via the `--active` CLI flag), **and**
+1. `dast.active.enabled` is `True`, **and**
 2. an explicit authorization acknowledgment is present
-   (`--i-am-authorized`, i.e. `scope.authorized_ack = True`), **and**
+   (`scope.authorized_ack = True`), **and**
 3. the target host is present in `scope.active_allowlist` (which must be
    non-empty).
 
 If any condition fails, the active scanner is not selected; passive scanners are
 unaffected.
+
+**None of the three is CLI-only.** `--active` sets the first and `--i-am-authorized`
+sets the second, and both are ordinary keys in §14's namespace, so a config file that
+sets them arms the tier with no flag typed at all: measured, a `secscan <url> --config
+…` invocation with no other argument ran `dast-active`, sent three probes and put
+`?q=hi'` on the wire. This paragraph replaces a parenthetical that said
+`dast.active.enabled` was "set only via the `--active` CLI flag", which was never true
+of any version.
+
+The third condition is the one that is not simply a setting. Whenever actives are
+enabled — by flag or by file — the CLI adds the *typed* target host to
+`active_allowlist`, and only that host, because naming a target is the strongest
+statement of intent available. Withholding it from that host is therefore not
+possible; withholding it from every *other* host in `allowed_hosts` is automatic, so
+widening the crawl never widens what may be probed.
+
+That is the intended design rather than a hole — a CI pipeline configures this in a
+file, and a flag cannot be reviewed in a pull request — but it is a documented one,
+because the reader's obligation differs: a committed config that carries
+`authorized_ack = true` is a standing authorization for whatever host later lands in
+`allowed_hosts`, and it is not re-typed per run. Anything that narrows the three
+conditions belongs in the config file, not in the assumption that a human is present.
 
 ---
 
@@ -496,7 +518,11 @@ Precedence for things that used to be duplicated:
   request gate consults the scope on every request and a crawler-local flag could
   only discover links the gate would then refuse (D60).
 - Identity (`http.user_agent`) is the default UA; `dast.crawler.user_agent`
-  overrides it for crawl traffic only if set.
+  overrides it for crawl traffic only if set. "Crawl traffic" means the crawler's own
+  GETs and nothing else — the active tier's probes and the passive checks share the
+  same client and keep the default, so the override is a per-request header rather
+  than a client setting. This sentence was in the contract for six releases before any
+  code read the key (D63).
 - There is no `dast.crawler.max_redirects`. The hop cap is five, in code. This
   namespace is frozen, and the two bounds that are *about* how much of somebody
   else's site to read are already exposed: every redirect hop is a request and is

@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 523 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 530 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1473,6 +1473,86 @@ vulnerability, a TLS check that skipped the case it exists for, and a file probe
 a host it never examined. The fix is not "follow redirects": it is that a hop we decline
 to follow has to be as loud as a page we failed to fetch, because what is behind it is
 not one page but everything.
+
+---
+
+### D63 — Two documents described behaviour the code did not have, in two directions
+
+**One key, six releases, zero readers.** `dast.crawler.user_agent` was in `DEFAULTS`
+from the first commit, with a comment next to it explaining its fallback
+(`None => fall back to http.user_agent`), a row in `docs/configuration.md` saying it
+"overrides `http.user_agent` for crawl traffic only", and a line in contract §14 saying
+the same thing in the frozen-namespace list. `grep -rn "crawler.user_agent" src/ tools/
+tests/` returned nothing. No function took the value, so no caller could pass it: the
+setting was accepted by the config validator, echoed by nothing, and had no effect in
+any released version.
+
+**Implemented rather than deleted, which is the opposite of D60's answer to the same
+shape.** `allow_subdomains` was deleted from the crawler because the behaviour already
+existed one layer down, in `Scope`, where the request gate could see it — the key was a
+duplicate that could only disagree with the thing actually enforcing it. Here there is
+no other layer: nothing anywhere sets a crawl-specific agent. And the behaviour is worth
+having for the reason the `http.user_agent` row already gives, that the agent string is
+a choice about the person being scanned rather than about you. Someone reading their own
+access log can separate reconnaissance from attack-shaped traffic if the two are spelled
+differently, and cannot if they are not.
+
+**A per-request header, not a client setting.** The client is shared: the active tier's
+probes and the passive tier's header, TLS and exposed-file fetches all go through the
+same `AsyncHttpClient`, and a probe is not crawl traffic. So `crawl` takes a
+`user_agent`, turns it into one `headers={"user-agent": ...}` dict, and `_walk` hands
+that to each `GET`. Unset — the default, and what every version has done — the dict is
+`None` and the request carries the client's identity untouched. An empty string in a
+config file is normalized to `None` at the call site, because
+`headers={"user-agent": ""}` would strip the identity rather than leave it alone, which
+is the one outcome the setting exists to prevent.
+
+**The test that matters is the wiring test.** The parameter and its caller landed in the
+same commit, so a test of `crawl(user_agent=...)` alone would have passed over the actual
+defect, which was that nothing read the key. Two tests sit on the crawl (the header is
+sent when set; nothing is sent when unset) and two on `_safe_crawl` (the configured value
+arrives as `user_agent`; unset and empty both arrive as `None`). Removing the one line in
+`_safe_crawl` reddens the second pair, which is the pair that would have failed in 2024.
+
+**The rehearsal needed a route.** Phase C's config now sets the key, so the loopback site
+sees two agents: the operator's on thirteen crawl GETs, the tool's own on the probes. C4
+is the positive control and comes first on purpose — C5, "no probe carried the crawl
+agent", is trivially true of a key nothing reads, which is exactly the vacuous assertion
+this file exists to avoid (D43). It went in phase C rather than phase A because A17
+asserts the whole run speaks with one voice, and that is the property of the *default*
+configuration worth pinning. With the fix removed, C4 reports zero requests.
+
+**The second document was wrong in the more dangerous direction.** Contract §11 listed
+the three conditions for selecting an active scanner and annotated the first one
+`dast.active.enabled` is `True` (set only via the `--active` CLI flag). The parenthetical
+was false in every version. `main` computes `active_enabled` from the *merged* config,
+so a config file is an equal route to all of it — including `scope.authorized_ack`,
+which is also an ordinary key. Measured against a loopback site: `secscan <url>
+--config <file>`, with no other argument, selected `dast-active`, reported three
+active requests, and put `?q=hi'` on the wire. A document promising that a human had
+to type something, over a code path where a committed file was enough.
+
+**That route is the design, and the fix is to say so.** A CI pipeline configures this in
+a file; a flag cannot be reviewed in a pull request. But the reader's obligation is
+different from what §11 implied, because a committed `authorized_ack = true` is a
+standing authorization that is not re-typed per run and will apply to whatever host later
+lands in `allowed_hosts`. Both halves are now written down, and three CLI tests pin them:
+the config-only route arms the tier and prints no warning, each condition removed on its
+own disarms it, and — the part that surprised the fix — the typed target host joins
+`active_allowlist` whenever actives are enabled by *either* route, so condition three
+cannot be withheld from the host somebody named while remaining automatic for every other
+host in scope. The same false attribution to the flag was in `cli.py`'s module docstring
+and in the comment beside the line that does it; both now say "whenever actives are
+enabled" and name the merged config.
+
+**Why:** A setting that is documented and unread is worse than a setting that does not
+exist, because the person who sets it believes they have changed something and behaves
+accordingly — and the two defects here are the same error pointing opposite ways. One
+promised a capability the code lacked, so an operator who configured a distinct crawl
+identity sent all their traffic under one name and could not tell the two kinds apart.
+The other promised a *restriction* the code lacked, so a reader auditing how attack
+traffic gets armed was told a human had to be present when a file was enough. Coverage
+claims and safety claims fail by the same mechanism, and only one of them fails quietly.
 
 ---
 

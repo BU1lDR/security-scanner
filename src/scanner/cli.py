@@ -26,8 +26,10 @@ proof of coverage.
 Active/intrusive checks stay fail-closed. ``--active`` only requests them; they
 run only when the authorization is acknowledged (``--i-am-authorized`` or config)
 and the target host is in the active allowlist. The CLI adds the explicitly-typed
-target host to that allowlist when ``--active`` is set (the typed host is the
-strongest signal of intent), but never lowers the acknowledgement gate.
+target host to that allowlist whenever actives are enabled — by flag *or* by
+``dast.active.enabled`` in a config file, because what is read here is the merged
+config (the typed host is the strongest signal of intent) — but never lowers the
+acknowledgement gate.
 """
 
 from __future__ import annotations
@@ -200,9 +202,12 @@ def _build_target(kind: str, value: str, config: Config, active: bool) -> Target
             allowed.add(host)
             if active:
                 # The explicitly-typed target host is the strongest signal of
-                # intent, so --active authorizes actives for it specifically. Only
-                # that host: with allow_subdomains on, its subdomains become in
-                # scope to read and stay out of the active allowlist.
+                # intent, so enabling actives authorizes them for it specifically.
+                # `active` is the *merged* config, not args.active: a config file
+                # that sets dast.active.enabled arms this path with no flag typed,
+                # which contract §11 denied until D63. Only that host, either way:
+                # with allow_subdomains on, its subdomains become in scope to read
+                # and stay out of the active allowlist.
                 active_allow.add(host)
         return Target(url=value, scope=_scope())
 

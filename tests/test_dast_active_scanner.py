@@ -6,6 +6,8 @@ from scanner.core.context import ScanContext
 from scanner.core.gate import OutOfScopeError
 from scanner.core.scope import Scope
 from scanner.core.target import Target
+from scanner.scanners.dast.crawler import CrawlResult
+from scanner.scanners.dast_active import scanner as active_module
 from scanner.scanners.dast_active.scanner import DastActiveScanner
 
 
@@ -351,3 +353,38 @@ def test_a_probe_that_never_got_an_answer_is_an_error_not_a_negative():
     assert all(e.scanner == "dast-active" for e in ctx.errors)
     assert any("timed out" in e.message for e in ctx.errors)
     assert not [s for s in ctx.skipped if s.check == "gate"]
+
+
+def _crawl_kwargs(monkeypatch, crawler_config):
+    """What ``_safe_crawl`` actually passes down, for a given ``dast.crawler``.
+
+    The wiring, not the header. ``dast.crawler.user_agent`` was dead because no
+    caller read the key — the crawl grew its parameter in the same commit, so a test
+    of the parameter alone would have passed straight over the defect (D63).
+    """
+    seen = {}
+
+    async def fake_crawl(entry, http, scope, **kwargs):
+        seen.update(kwargs)
+        return CrawlResult()
+
+    monkeypatch.setattr(active_module, "crawl", fake_crawl)
+    target = Target(url="https://example.com/", scope=Scope(allowed_hosts={"example.com"}))
+    cfg = Config.from_dict({"dast": {"active": {"enabled": True}, "crawler": crawler_config}})
+    _collect(ScanContext(target=target, scope=target.scope, http=_SiteHttp(), config=cfg))
+    return seen
+
+
+def test_the_configured_crawler_user_agent_reaches_the_crawl(monkeypatch):
+    seen = _crawl_kwargs(
+        monkeypatch, {"user_agent": "secscan-crawl/1.0 (+https://x.invalid)"},
+    )
+    assert seen.get("user_agent") == "secscan-crawl/1.0 (+https://x.invalid)"
+
+
+def test_an_unset_crawler_user_agent_is_passed_as_none_not_as_an_empty_string(monkeypatch):
+    """``headers={"user-agent": ""}`` would strip the identity rather than leave it
+    alone, which is the opposite of the documented default. An empty string in the
+    config file has to arrive as ``None`` for the same reason."""
+    assert _crawl_kwargs(monkeypatch, {})["user_agent"] is None
+    assert _crawl_kwargs(monkeypatch, {"user_agent": ""})["user_agent"] is None

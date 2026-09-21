@@ -231,14 +231,16 @@ def test_active_without_ack_warns(tmp_path, capsys):
 # --- the config reaching the scope (D60) ---
 
 class _ScopeRecorder(Engine):
-    """Runs nothing; keeps the scope the CLI built."""
+    """Runs nothing; keeps the scope and the run kwargs the CLI built."""
 
     def __init__(self):
         super().__init__(registry=Registry())
         self.scope = None
+        self.kwargs: dict = {}
 
     async def run(self, target, **kwargs):
         self.scope = target.scope
+        self.kwargs = dict(kwargs)
         return await super().run(target, **kwargs)
 
 
@@ -280,3 +282,67 @@ def test_allow_subdomains_does_not_extend_the_active_authorization(tmp_path):
     main(["https://example.com/", "--active", "--config", cfg], engine=engine)
     assert engine.scope.active_allowed("https://example.com/")
     assert not engine.scope.active_allowed("https://admin.example.com/")
+
+
+# --- which of the three active conditions a flag actually owns (D63) ---
+
+_ARMED = """
+[scope]
+allowed_hosts = ["example.com"]
+active_allowlist = ["example.com"]
+authorized_ack = true
+
+[dast.active]
+enabled = true
+"""
+
+
+def test_a_config_file_alone_arms_the_active_tier(tmp_path, capsys):
+    """Contract §11 said `dast.active.enabled` was "set only via the `--active` CLI
+    flag" for as long as the document existed, and it never was: `main` reads the
+    *merged* config, so all three gating conditions are ordinary keys. Measured
+    end-to-end this invocation sends probes. Pinned because the sentence that was
+    wrong is the one a reader consults to decide whether a committed config file can
+    put attack traffic on the wire without anybody typing anything. It can."""
+    engine = _ScopeRecorder()
+    assert main(["https://example.com/", "--config", _config(tmp_path, _ARMED)],
+                engine=engine) == 0
+    assert engine.kwargs.get("active_enabled") is True
+    assert engine.scope.authorized_ack is True
+    assert engine.scope.active_allowed("https://example.com/")
+    # And silently: the warning exists for the opposite case, an active run with no
+    # acknowledgment, so its absence here is part of the claim.
+    assert "authoriz" not in capsys.readouterr().err.lower()
+
+
+def test_the_config_route_is_still_fail_closed_on_each_condition(tmp_path):
+    """The positive control above would also pass if the gate had simply stopped
+    gating. Each condition removed on its own has to disarm the tier."""
+    engine = _ScopeRecorder()
+    without_enabled = _ARMED.replace("enabled = true", "enabled = false")
+    main(["https://example.com/", "--config", _config(tmp_path, without_enabled)],
+         engine=engine)
+    assert engine.kwargs.get("active_enabled") is False
+
+    engine = _ScopeRecorder()
+    without_ack = _ARMED.replace("authorized_ack = true", "authorized_ack = false")
+    main(["https://example.com/", "--config", _config(tmp_path, without_ack)],
+         engine=engine)
+    assert engine.scope.authorized_ack is False
+    assert not engine.scope.active_allowed("https://example.com/")
+
+
+def test_enabling_actives_in_a_file_allowlists_the_typed_host_and_only_it(tmp_path):
+    """The third condition cannot be withheld from the typed host, and that is
+    deliberate rather than a gap: `_build_target` adds it whenever actives are on,
+    because naming a target is the strongest statement of intent there is. What it
+    does *not* do is extend to the rest of `allowed_hosts` — so a config file that
+    widens the crawl does not widen what may be probed."""
+    cfg = _ARMED.replace('allowed_hosts = ["example.com"]',
+                         'allowed_hosts = ["example.com", "other.test"]')
+    cfg = cfg.replace('active_allowlist = ["example.com"]', "")
+    engine = _ScopeRecorder()
+    main(["https://example.com/", "--config", _config(tmp_path, cfg)], engine=engine)
+    assert engine.scope.active_allowed("https://example.com/")
+    assert engine.scope.allows("https://other.test/")
+    assert not engine.scope.active_allowed("https://other.test/")

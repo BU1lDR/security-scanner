@@ -181,6 +181,11 @@ FORBIDDEN = (
 # story, so the assertion is on the shape and not merely on "one distinct value".
 UA_SHAPE = re.compile(r"^secscan/\d+\.\d+\.\d+ \(\+https://\S+\)$")
 
+#: Phase C's ``dast.crawler.user_agent``. Deliberately not of ``UA_SHAPE``: it is
+#: the operator's string, not the tool's, and the two have to be told apart by
+#: value in the access log for the setting to be worth anything.
+CRAWL_UA = "secscan-crawl/1.0 (+https://example.invalid/rehearsal)"
+
 
 # --------------------------------------------------------------------------- #
 # the site
@@ -524,7 +529,11 @@ timeout_s = 10.0
 """
 
 # Phase C. The budget, not the pacing, is what this config measures, so the rate
-# goes back up and the scope/crawler sections are left at their defaults.
+# goes back up and the scope section and the crawler's *bounds* are left at their
+# defaults. The one crawler key set here is user_agent, which changes no bound and
+# so cannot move the numbers C1-C3 measure. It lives in this phase rather than in
+# MAIN_CONFIG because phase A's A17 asserts the whole run speaks with one voice,
+# and that is the property of the default configuration worth pinning.
 #
 # Five, and the odd number is the whole point. This was 4, and 4 cannot catch the
 # defect C3 exists to catch: the checks cost 1 (xss) + 2 (sqli) per point, so a
@@ -537,6 +546,9 @@ CAPPED_CONFIG = f"""
 [dast.active]
 include_post = true
 max_requests = {CAPPED_BUDGET}
+
+[dast.crawler]
+user_agent = "{CRAWL_UA}"
 
 [http]
 per_host_rps = 25.0
@@ -1074,6 +1086,33 @@ def phase_c(checks: Checks, url: str, config_path: Path,
         f"and sent exactly the {CAPPED_BUDGET} requests it was allowed",
         f"active_requests_sent={capped.get('active_requests_sent')!r}, "
         f"scan={capped!r}",
+    )
+    # C4: dast.crawler.user_agent, which nothing read until D63 -- it had a
+    # default, a comment describing its fallback, a documented row and a line in
+    # contract 14 promising it "overrides it for crawl traffic only if set". This
+    # is the positive control and it has to come first, because C5 -- no probe
+    # carried the crawl agent -- is trivially true of a key nothing reads (D43).
+    crawl_ua = [r for r in wire if r["ua"] == CRAWL_UA]
+    checks.expect(
+        len(crawl_ua) >= 2,
+        f"the configured crawl agent reached the site ({len(crawl_ua)} requests)",
+        f"agents seen: {sorted({r['ua'] for r in wire})}",
+        f"expected the crawl GETs to carry {CRAWL_UA!r}",
+    )
+    # C5: and only the crawl carried it. The header is set per request rather than
+    # on the client because the client is the active tier's too, and a probe is not
+    # reconnaissance. That separation is the entire value of the setting: the person
+    # being scanned can tell the two kinds of traffic apart in their own access log.
+    mislabelled = [f"{r['method']} {r['path'][:100]}" for r in crawl_ua
+                   if XSS_MARKER in decoded(r) or REDIRECT_PROBE_PATH in decoded(r)]
+    others = sorted({r["ua"] for r in wire} - {CRAWL_UA})
+    checks.expect(
+        not mislabelled and len(others) == 1
+        and UA_SHAPE.match(others[0] or "") is not None,
+        f"and the probes kept the tool's own: {others}",
+        *[f"probe traffic sent as crawl traffic: {m}" for m in mislabelled],
+        "expected exactly one non-crawl agent of the shape "
+        f"'secscan/X.Y.Z (+https://...)'; saw {others}",
     )
 
 

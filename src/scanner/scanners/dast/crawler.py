@@ -133,7 +133,7 @@ def _why(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {text}" if text else exc.__class__.__name__
 
 
-async def _get(http, url: str) -> tuple[object | None, str | None]:
+async def _get(http, url: str, headers: dict | None) -> tuple[object | None, str | None]:
     """Fetch one page as ``(response, None)`` or ``(None, reason)``.
 
     One dead link must not sink the crawl — but it must not vanish either, which is
@@ -141,8 +141,14 @@ async def _get(http, url: str) -> tuple[object | None, str | None]:
     A refused connection, a timeout and a 200 with no links all produced the same
     crawl result, so a site that could not be walked reported the same coverage as
     a site with nothing on it. The reason travels back instead (D58).
+
+    ``headers`` is where ``dast.crawler.user_agent`` lands, and it is per-request
+    rather than set on the client because the client is shared: the active tier's
+    probes go through the same object and are not crawl traffic.
     """
     try:
+        if headers:
+            return await http.get(url, headers=headers), None
         return await http.get(url), None
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not swallowed
         return None, _why(exc)
@@ -216,6 +222,7 @@ async def _walk(
     *,
     max_depth: int,
     max_pages: int,
+    headers: dict | None = None,
 ) -> None:
     """The breadth-first walk, appending into ``result`` as it goes.
 
@@ -248,7 +255,7 @@ async def _walk(
             ))
             continue
 
-        resp, reason = await _get(http, url)
+        resp, reason = await _get(http, url, headers)
         fetched += 1
         if resp is None:
             result.problems.append(CrawlProblem(
@@ -346,6 +353,7 @@ async def crawl(
     *,
     max_depth: int = 2,
     max_pages: int = 50,
+    user_agent: str | None = None,
 ) -> CrawlResult:
     """Walk the site from ``entry_url``, bounded and inside ``scope``.
 
@@ -354,12 +362,21 @@ async def crawl(
     notion of scope would queue a subdomain link and then watch the request gate
     refuse every fetch of it, because the gate asks the scope, not the crawler.
     ``Scope.allow_subdomains`` is where that setting lives now (D60).
+
+    There *is* a ``user_agent`` parameter, and there was not one until D63.
+    ``dast.crawler.user_agent`` had a default, a comment describing its fallback, a
+    row in ``docs/configuration.md`` and a line in contract §14 saying it "overrides
+    it for crawl traffic only if set" — and no code anywhere read it. It is one
+    request header, applied per request rather than to the client, because the client
+    is shared with the active tier and a probe is not crawl traffic. Left unset,
+    every request carries ``http.user_agent``, which is what always happened.
     """
     result = CrawlResult()
     try:
         await _walk(
             result, entry_url, http, scope,
             max_depth=max_depth, max_pages=max_pages,
+            headers={"user-agent": user_agent} if user_agent else None,
         )
     except Exception as exc:  # noqa: BLE001 - keep what was collected, report the rest
         # The caller's own try/except is still there and still needed; this one

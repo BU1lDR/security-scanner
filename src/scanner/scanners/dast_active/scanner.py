@@ -213,6 +213,7 @@ class DastActiveScanner(Scanner):
                 ctx.scope,
                 max_depth=int(c.get("max_depth", 2)),
                 max_pages=int(c.get("max_pages", 50)),
+                user_agent=c.get("user_agent") or None,
                 # allow_subdomains is deliberately absent: it is carried by
                 # ctx.scope, which the crawl and the request gate both consult.
             )
