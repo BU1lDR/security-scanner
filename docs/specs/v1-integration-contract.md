@@ -38,6 +38,10 @@ frozen contract.
 
 ## 1. Package layout
 
+- The distribution on PyPI is **`secscan`** — the same name as the command. It was
+  `security-scanner` until D64, which is a different author's project already on PyPI,
+  so no release under that name could ever have been installed. This bullet was the one
+  name §1 did not freeze, and it was the one name that was wrong.
 - The installed package is **`scanner`**, living at `src/scanner/`.
 - Console entry point: `secscan = scanner.cli:main`.
 - Core lives under `scanner.core.*`.

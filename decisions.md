@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 541 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 548 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1643,6 +1643,71 @@ build that warns on a deadline, a report that vanishes while the exit code says
 claim the thing itself contradicts. A tool whose entire argument is that you should not
 have to take its word for anything has to be checkable at the edges too, because the
 edges are what a stranger meets first.
+
+---
+
+### D65 — A document that says "frozen" twelve times and was checked by nothing
+
+**The contract asserts its own authority and nothing enforced it.**
+`docs/specs/v1-integration-contract.md` opens by calling itself "the single source of
+truth for how the pieces of the scanner fit together" and adds a rule: "if a scanner's
+design disagrees with this file, this file wins." Twelve of its sections are headed
+"(frozen)". No test read it. `docs/configuration.md` has been held to the config surface
+since D51, and the one document that claims to be frozen was the one with no gate —
+which is how D63 came to find it describing an active-tier gating rule the code did not
+have, six releases after it was written.
+
+**The one name it did not freeze was the one that was wrong.** §1 pins the module root,
+the console entry point, every `scanner.scanners.*` subpackage and the registry's import
+path. It never said what the distribution is called. That is the name a stranger types
+to get the tool, and it was `security-scanner` — a different author's project on PyPI —
+for the whole life of this project until D64. A frozen-names section that omits the one
+name nobody could have used is not a coincidence: the claim left unwritten is the claim
+that goes unchecked.
+
+**The assertions parse the document rather than restate it.** `tests/test_contract.py`
+pulls the enum bodies out of the contract's fenced `python` blocks, the entry point out
+of its bullet, the subpackage list out of its sub-bullets, and compares each against the
+code and against `pyproject.toml`. Comparing to a retyped literal would only prove the
+test agrees with itself; what has to hold is that two files agree, so both sides are
+read.
+
+**Both directions on the subpackage list**, because the two failures are different and
+both are real. A contract naming a package that does not exist sends an integrator to a
+dead import. A contract omitting one that does exist hides a scanner from the document
+people are told to trust — and `dast_active`, the tier that puts attack-shaped traffic
+on somebody else's network, is the worst thing here to leave undocumented.
+
+**The enum values are load-bearing, not decorative.** §2 says the integers are frozen
+"so anything comparing to a literal stays correct", and things do compare: the exit-code
+rule (D14), the `--severity-threshold` filter, and every report already written to a
+file. Renumbering `Severity` without the document following would fail nothing — it
+would silently reinterpret reports produced by earlier versions.
+
+**The first test is the positive control.** Every other assertion compares something
+parsed out of markdown, and a regex that quietly stops matching turns all of them green:
+the vacuous-pass shape this repo keeps finding in its own gates (D43). Renaming the code
+fences from `python` to `py` reddens three tests rather than none.
+
+**Each check went red on its own before it was kept** (D57). Renumbering `CRITICAL` to
+`5`, deleting the `dast_active` bullet, changing the entry point to `scanner.main:run`,
+and putting `security-scanner` back as the distribution name each reddens exactly one
+test.
+
+**D64's rename is an upgrade hazard, and measuring it was not optional.** `pip` has no
+way to know `secscan` and `security-scanner` are the same project, so `pip install -e .`
+over an older install leaves both registered. Measured in this repo's own environment:
+two `.dist-info` directories, two `__editable__` `.pth` files adding the same `src` to
+`sys.path`, and a single `secscan` executable that both `RECORD` files claim — after
+which `pip uninstall` of either name deletes the command out from under the other, which
+is exactly what happened here. The README now says to remove the old name first.
+
+**Why:** The reason to write a contract down is that memory drifts, and the reason to
+test it is that documents drift too — only more quietly, because nothing runs them. A
+file that says "frozen" and is enforced by nothing is worse than one that says nothing,
+because it invites the next person to build against it. The argument this project makes
+about its own scanner is that a claim nobody can check is not evidence, and that
+standard has to apply hardest to the file that tells everyone else what the shapes are.
 
 ---
 

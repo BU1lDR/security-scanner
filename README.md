@@ -32,6 +32,12 @@ source .venv/bin/activate       # on Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
+If you installed this before, uninstall the old name first — `pip uninstall
+security-scanner` — because the distribution was renamed to `secscan` and `pip` has no
+way to know the two are the same project. Installing over the top leaves *both*
+registered, each with its own path entry and each claiming the same `secscan`
+executable, and uninstalling either one then takes the executable away from the other.
+
 That gives you a `secscan` command:
 
 ```bash
