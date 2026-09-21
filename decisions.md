@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 618 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 632 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2343,6 +2343,85 @@ read", and a dependency set does not only shrink a file at a time. The line-leve
 `continue` was the last place where the number in the report was the number the parser
 managed rather than the number the project declared, and the two had been silently
 equated since v1. Suite 600 to 618.
+
+---
+
+### D75 — Every POST form on the site was declined by default and nothing said so
+
+**Five narrowings spoke and the sixth used a `continue`.** The active tier declines
+work in six places. Switching it off with `dast.active.enabled`, naming a check that
+does not exist, exhausting `max_requests`, being refused by the per-request gate, and
+a check that ran but reached no verdict all end in `ctx.emit_skip` — because each of
+them ends with a parameter that was never tested and a findings list shaped exactly
+like the findings list of a parameter that was. The sixth is `include_post`, which
+lives one module away in the crawler→active bridge and dropped every POST form on the
+site by falling off the end of a bare `continue`. The scanner never learned the forms
+existed, so it had nothing to disclose.
+
+**The default is the one that matters.** `include_post` defaults to *off*, so this
+was not an edge configuration — it was what every operator got unless they had read
+far enough into the config reference to find the key. An application whose injectable
+inputs are its login form, its search box and its comment field was crawled, never
+probed, and reported with an empty `dast.active.*` findings list and exit 0. The
+scanner's own README calls the active tier "detection-only checks against the inputs
+it found"; it found them and then declined them, silently.
+
+**A skip, not an error, and not a finding.** Nothing was refused and nothing broke:
+the operator chose a default and the scanner honoured it, so `emit_failure` and exit 3
+would be asserting a fault that did not occur. Nor is it a `Finding` the way SCA's
+coverage gaps are — SCA reports coverage in findings because its gaps are *about
+files* and a report reader wants them beside the dependency rows, while the active
+tier already keeps a skip channel for exactly this sentence and has five other
+entries in it. Use the convention the subsystem has.
+
+**`check="post-forms"` is load-bearing and not decoration.** `engine.py` keeps a
+scanner out of `report.scanners_run` when it sees a skip with an *empty* check. This
+tier did run — it crawled the site and probed every GET parameter and GET form it
+found — so a whole-scanner skip here would delete the tier from the "Ran:" line and
+take the work it did complete with it. Same trap D71 documented, one check later.
+
+**The count has to be the count.** The first version of the record counted controls,
+and the rehearsal target's own comment form caught it: a checkbox pair sharing one
+name is two controls and one injection point, so the skip claimed a gap of four where
+opting in would close three. Overstating a coverage gap is the same defect as
+understating one — the operator is sizing a config decision against that number. The
+names are deduplicated in the bridge, and the scanner counts distinct
+`(endpoint, input)` pairs rather than summing per-form totals, which is what the word
+"input" means to the person reading the line. Forms with nothing targetable in them —
+a logout button, a CSRF-only POST — are not recorded at all: turning `include_post`
+on produces no injection point for those either, so declining them costs no coverage
+and reporting it would send the reader to a config change that changes nothing.
+
+**Eighth time a green test was pinning the defect.**
+`test_post_forms_are_skipped_unless_include_post` asserted
+`injection_points(crawl, include_post=False) == []` and nothing else, so a login form
+vanishing through that branch was indistinguishable from a site with no forms on it.
+A test that cannot tell "we looked and found nothing" from "we did not look" is not a
+complete assertion about a security check — D57, D66, D70, D71, D72, D73 and D74 were
+each found the same way. Sixteen mutations confirm the fourteen new tests: dropping
+the record, recording GET forms, recording when the operator opted in, recording forms
+with nothing targetable, counting duplicate names twice, carrying no names, forgetting
+the sink in the scanner, collecting and never reporting, emitting a failure instead of
+a skip, emptying `check=`, restoring the summed count, dropping the not-evidence
+sentence, naming no URL, uncapping the URL list, one skip per form, and a narrowing
+that also eats GET forms. All sixteen fail.
+
+**The rehearsal grew the phase its config files had excluded.** Both TOML files in
+`tools/check_active_rehearsal.py` set `include_post = true`, so phases A–D measured
+only the opted-in path and the default went unexercised over a real socket. There is
+no CLI flag for the key, so phase F is in-process like phase E: it aims at `/forms`,
+asserts the skip names the form and its three inputs, reads the *server's own log* to
+confirm no POST was sent, confirms the GET form on the same page was still probed, and
+confirms the tier stayed in `scanners_run` with no error. Phase A gained A30 as the
+negative half — an opted-in run must report no gap, or a disclosure that fires either
+way is not a disclosure. Rehearsal 51 assertions to 56.
+
+**Why:** A narrowing that is invisible is indistinguishable from a target that is
+clean, and this was the widest one in the tool: not a rare manifest or an unusual file
+extension but the default treatment of the single most common injectable surface on
+the web. The five sibling narrowings had each been given a voice one at a time; this
+one was missed because it narrows in a different module from the one that reports.
+Suite 618 to 632.
 
 ---
 

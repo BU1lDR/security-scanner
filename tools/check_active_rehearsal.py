@@ -60,11 +60,13 @@ looped over a list of findings and ran zero assertions when the list was empty -
 a PASS whose meaning was "there was no finding to check". That is the one shape
 this file exists to refuse, so counts are asserted before loops throughout.
 
-**Five phases.** Authorized; authorization withheld; a four-request budget; a
-socket bound but never listened on (which must exit 3, not 0); and one
-in-process phase for the ``dast.active.enabled`` guard that argv cannot reach.
-The in-process phase runs its *positive* control first, because D43's first
-harness reported PASS on eight gate cases while the scanner registry was empty.
+**Six phases.** Authorized; authorization withheld; a four-request budget; a
+socket bound but never listened on (which must exit 3, not 0); and two in-process
+phases for the two config keys argv cannot reach -- ``dast.active.enabled``, and
+the ``include_post`` *default*, which the TOML files here all override and which
+is therefore the one path the CLI phases could not measure (D75). The in-process
+phases run their *positive* control first, because D43's first harness reported
+PASS on eight gate cases while the scanner registry was empty.
 
 **Two listeners.** ``127.0.0.1`` is the target. ``127.0.0.2`` is in
 ``scope.allowed_hosts`` and *not* in the active allowlist, so the crawl reads it
@@ -1004,6 +1006,17 @@ def phase_a(checks: Checks, url: str, config_path: Path,
         "the passive tier also ran",
         "no passive finding against a site serving no security headers at all",
     )
+    # A30: the negative control for F1. MAIN_CONFIG sets include_post = true, and an
+    # operator who opted in must not be told their forms went untested -- a
+    # disclosure that fires either way is not a disclosure. F1 is the positive half.
+    post_skips = [
+        s for s in (scan.get("skipped") or []) if s.get("check") == "post-forms"
+    ]
+    checks.expect(
+        not post_skips,
+        "include_post = true reports no declined-forms gap",
+        f"skipped={post_skips!r} on a run that probed the comment form",
+    )
     return len(probes)
 
 
@@ -1309,6 +1322,102 @@ def phase_e(checks: Checks, port: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# phase F -- in-process, the default that drops every form
+# --------------------------------------------------------------------------- #
+
+def phase_f(checks: Checks, port: int) -> None:
+    """``include_post`` defaults to *off*, which no rehearsal config exercised:
+    both TOML files set it to true, so phases A-D all measured the opted-in
+    path. The default is what an operator gets, and under it every POST form on
+    the site was dropped by a bare ``continue`` -- crawled, never probed, and
+    reported with an empty findings list, which is the output of a clean scan
+    (D75). Like phase E this needs an in-process caller, because there is no CLI
+    flag for the key.
+
+    Aimed at /forms so the crawl has real form HTML to parse: a GET form whose
+    action no link reaches, and a POST form carrying two text fields, a hidden
+    CSRF token, a checkbox pair sharing one name and a submit button. Those last
+    three are why the count is worth asserting at all -- six controls, of which
+    the hidden token and the submit are never targeted and the two checkboxes are
+    one injection point, so the honest number is three."""
+    sys.path.insert(0, str(ROOT / "src"))   # already there via phase E; harmless
+    from scanner.core.config import Config
+    from scanner.core.egress import Egress
+    from scanner.core.engine import Engine
+    from scanner.core.gate import RequestGate
+    from scanner.core.http import AsyncHttpClient
+    from scanner.core.scope import Scope
+    from scanner.core.target import Target
+
+    WIRE.clear()
+    config = Config.from_dict({
+        "dast": {
+            "enabled": False,
+            "active": {"enabled": True, "max_requests": 200},
+            # include_post deliberately absent: this phase is about the default.
+        },
+        "http": {"per_host_rps": 25.0, "timeout_s": 10.0},
+    })
+    scope = Scope(
+        allowed_hosts={"127.0.0.1"},
+        active_allowlist={"127.0.0.1"},
+        authorized_ack=True,
+    )
+    target = Target(url=f"http://127.0.0.1:{port}/forms", scope=scope)
+
+    async def go():
+        gate = RequestGate(scope=scope, egress=Egress())
+        async with AsyncHttpClient(gate, per_host_rps=25.0, timeout_s=10.0) as http:
+            return await Engine().run(
+                target, active_enabled=True, http=http, config=config,
+            )
+
+    report = asyncio.run(go())
+    wire = WIRE.snapshot()
+    posts = [r for r in wire if r["method"] == "POST"]
+    skips = [s for s in report.skipped if s.check == "post-forms"]
+    print(f"  [{len(wire)} reqs, {len(posts)} POSTs, "
+          f"{len(skips)} declined-forms skip(s)]")
+
+    # F1: the disclosure. A30 is the negative half, on the opted-in run.
+    reason = skips[0].reason if skips else ""
+    checks.expect(
+        len(skips) == 1
+        and "1 form(s)" in reason
+        and "3 input(s)" in reason
+        and "/comment" in reason,
+        "the default discloses the form it declined, with its input count",
+        f"skipped={[(s.check, s.reason) for s in report.skipped]!r}",
+        "expected one post-forms skip naming /comment and 3 of its 6 controls "
+        "(author, comment and tags; the hidden token and the submit are never "
+        "targeted, and the two checkboxes are one input)",
+    )
+    # F2: and it really did decline. F1 read the report; this reads the site's own
+    # log, so a scanner that emitted the skip and probed anyway cannot pass both.
+    checks.expect(
+        not posts, "and sent no POST to it",
+        *[f"{r['method']} {r['path'][:80]}" for r in posts[:5]],
+    )
+    # F3: the narrowing is POST-shaped and nothing else. The GET form's action is
+    # reached by no link on the site, so /find in the log can only have come
+    # through the form path -- if disclosing the gap had also dropped GET forms,
+    # the report would be honest about a hole it had just dug.
+    checks.expect(
+        any(r["path"].startswith("/find") for r in wire),
+        "while the GET form on the same page was still probed",
+        f"paths seen: {sorted({r['path'].split('?')[0] for r in wire})!r}",
+    )
+    # F4: a declined default is not a fault and not a whole-scanner skip. Exit 3
+    # would claim an error that did not happen; an empty `check` would take the
+    # tier out of scanners_run, deleting the GET work F3 just proved it did.
+    checks.expect(
+        "dast-active" in report.scanners_run and not report.errors,
+        "and the tier still counts as having run, with no error",
+        f"scanners_run={report.scanners_run!r}, errors={len(report.errors)}",
+    )
+
+
+# --------------------------------------------------------------------------- #
 
 def main() -> int:
     # ASCII only. A Windows console defaults to cp1252, where a box-drawing
@@ -1361,6 +1470,8 @@ def main() -> int:
             phase_d(checks, main_config)
             print("\n  -- E: in-process, dast.active.enabled --")
             phase_e(checks, port1)
+            print("\n  -- F: in-process, the include_post default --")
+            phase_f(checks, port1)
     finally:
         for srv in (srv1, srv2):
             srv.shutdown()

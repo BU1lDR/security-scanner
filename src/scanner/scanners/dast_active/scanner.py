@@ -26,7 +26,12 @@ become ``ScanError``s so the run exits 3 rather than 0, and hosts the request ga
 refused become ``ScanSkip``s so "we were not allowed to test that" is told apart
 from "we tested it and it was fine" (D58, D59). A check that ran and still could
 not decide — the target was already emitting the signal the check reads — is a
-third kind of non-answer and gets its own skip (D71).
+third kind of non-answer and gets its own skip (D71). The fourth is not a
+non-answer but a question never asked: the POST forms the crawler→active bridge
+drops unless ``dast.active.include_post`` is set. That is the default, so the
+common case — an application whose injectable inputs are its login, search and
+comment forms — was crawled, never probed, and reported with an empty findings
+list (D75).
 """
 
 from __future__ import annotations
@@ -40,7 +45,11 @@ from scanner.core.registry import register
 from scanner.core.scanner import Requires, Scanner
 from scanner.scanners.dast.crawler import INCOMPLETE_KINDS, CrawlResult, crawl
 from scanner.scanners.dast_active.checks import ALL_CHECKS, Inconclusive
-from scanner.scanners.dast_active.injection import injection_points
+from scanner.scanners.dast_active.injection import DeclinedForm, injection_points
+
+#: How many form URLs one skip names before summarizing. Same reasoning as
+#: ``coverage._MAX_LISTED``: the line is read by a person, and forty URLs is none.
+_MAX_LISTED_FORMS = 5
 
 
 class _BudgetReached(Exception):
@@ -148,7 +157,11 @@ class DastActiveScanner(Scanner):
 
         crawl_result = await self._safe_crawl(ctx)
         include_post = bool(cfg.get("dast.active.include_post", False)) if cfg else False
-        points = injection_points(crawl_result, include_post=include_post)
+        declined: list[DeclinedForm] = []
+        points = injection_points(
+            crawl_result, include_post=include_post, declined=declined
+        )
+        self._report_declined_forms(ctx, declined)
         checks = self._selected_checks(ctx, cfg)
         max_requests = int(cfg.get("dast.active.max_requests", 200)) if cfg else 200
 
@@ -278,6 +291,54 @@ class DastActiveScanner(Scanner):
                     "dast-active: crawl skipped %s (%s: %s)",
                     problem.url, problem.kind, problem.detail,
                 )
+
+    @staticmethod
+    def _report_declined_forms(ctx, declined: list[DeclinedForm]) -> None:
+        """Say that the site's forms were found and left alone.
+
+        ``include_post`` is one of this tier's six narrowings and was the only one
+        that narrowed without a word. The other five — the tier switched off, a check
+        name that matches nothing, the request budget, a gate refusal, a check that
+        reached no verdict — all emit a skip, because each of them ends with a
+        parameter that was not tested and a findings list that looks exactly like the
+        findings list of a parameter that was. Dropping every POST form on the site
+        ended the same way and said nothing, so an application whose only injectable
+        inputs are its login, search and comment forms was crawled, never probed, and
+        reported clean (D75).
+
+        One skip for the whole site rather than one per form: the operator's next
+        action is a single config line, and a report with thirty identical skips in it
+        has buried the thing it is trying to say. The parameter count is carried
+        because "4 forms" and "4 forms, 19 inputs" are different sizes of gap, and the
+        URLs are listed up to a cap so the line stays readable on a large site.
+
+        ``check`` is set deliberately: a skip with an empty ``check`` takes the scanner
+        out of ``report.scanners_run`` (``engine.py``), and the tier *did* run — it
+        crawled, and it tested every GET parameter it found.
+        """
+        if not declined:
+            return
+        # Distinct (endpoint, input), which is what the word "input" means to the
+        # person reading the line. Summing the per-form counts would count the same
+        # named input twice when a site serves two forms from one action URL, and the
+        # number would then be larger than the gap opting in would close.
+        params = len({(f.url, p) for f in declined for p in f.params})
+        urls = sorted({f.url for f in declined})
+        listed = ", ".join(urls[:_MAX_LISTED_FORMS])
+        if len(urls) > _MAX_LISTED_FORMS:
+            listed += f" and {len(urls) - _MAX_LISTED_FORMS} more"
+        ctx.logger.info(
+            "dast-active: %d form(s) with %d input(s) were not probed "
+            "(dast.active.include_post is not set).", len(declined), params,
+        )
+        ctx.emit_skip(
+            "dast-active",
+            f"{len(declined)} form(s) carrying {params} input(s) were found and not "
+            f"probed: they submit with POST and dast.active.include_post is not set, "
+            f"so no attack-shaped request was sent to them ({listed}). Absence of "
+            f"findings for these inputs is not evidence that they are safe",
+            check="post-forms",
+        )
 
     @staticmethod
     def _selected_checks(ctx, cfg):

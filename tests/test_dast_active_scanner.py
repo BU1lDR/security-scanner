@@ -468,3 +468,159 @@ def test_an_unset_crawler_user_agent_is_passed_as_none_not_as_an_empty_string(mo
     config file has to arrive as ``None`` for the same reason."""
     assert _crawl_kwargs(monkeypatch, {})["user_agent"] is None
     assert _crawl_kwargs(monkeypatch, {"user_agent": ""})["user_agent"] is None
+
+
+# ── forms the default declines to probe, which said nothing (D75) ─────────────
+
+
+class _FormSiteHttp(_SiteHttp):
+    """A site whose injectable surface is its forms: a login and a comment box, both
+    POST, plus one GET form. The ordinary shape of an application, and the shape the
+    active tier declines by default."""
+
+    _HOME = (
+        '<html><body>'
+        '<form action="/login" method="post">'
+        '<input name="username" type="text">'
+        '<input name="password" type="password">'
+        '<input name="csrf" type="hidden" value="tok">'
+        '<input name="go" type="submit" value="Log in">'
+        '</form>'
+        '<form action="/comment" method="POST">'
+        '<textarea name="body"></textarea>'
+        '</form>'
+        '<form action="/find" method="get"><input name="q" type="text"></form>'
+        '</body></html>'
+    )
+
+    async def get(self, url, *, active=False, params=None, **kwargs):
+        self.gets.append({"url": url, "active": active})
+        path, _ = self._merged(url, params)
+        if path == "/":
+            return _Resp(self._HOME)
+        if path == "/find":
+            return _Resp("<html>static results</html>")
+        return _Resp("not found", status_code=404)
+
+
+def test_forms_the_default_declines_to_probe_are_disclosed():
+    """Five narrowings in this tier emit a skip and the sixth emitted a ``continue``.
+    An application whose injectable inputs are its login and comment forms was
+    crawled, never probed, and reported with an empty findings list — which is the
+    same output as an application that was probed everywhere and held (D42, D75).
+
+    The input count is asserted alongside the form count because two forms carrying
+    three inputs and two forms carrying thirty are different amounts of untested
+    surface, and the operator sizing the decision needs the second number."""
+    ctx = _ctx(_FormSiteHttp())
+    findings = _collect(ctx)
+
+    declined = [s for s in ctx.skipped if s.check == "post-forms"]
+    assert len(declined) == 1, ctx.skipped
+    reason = declined[0].reason
+    assert "2 form(s)" in reason, reason
+    assert "3 input(s)" in reason, reason        # username, password, body
+    assert "https://example.com/login" in reason
+    assert "https://example.com/comment" in reason
+    assert "include_post" in reason
+    assert "not evidence" in reason              # the D42 sentence
+    assert declined[0].scanner == "dast-active"
+    assert ctx.errors == [], ctx.errors          # a policy default is not a fault
+    assert not any(f.rule_id.startswith("dast.active.") for f in findings)
+
+
+def test_opting_in_emits_no_declined_forms_skip():
+    """The other direction. A skip emitted unconditionally would satisfy the test
+    above while telling every operator who had already opted in that their forms went
+    untested."""
+    ctx = _ctx(_FormSiteHttp(), overrides={"include_post": True})
+    _collect(ctx)
+    assert not [s for s in ctx.skipped if s.check == "post-forms"], ctx.skipped
+
+
+def test_a_site_with_no_post_forms_emits_no_declined_forms_skip():
+    """The crawled site here has one GET parameter and no form at all. A coverage gap
+    reported on a scan that had none teaches the reader to skip the section."""
+    ctx = _ctx(_SiteHttp())
+    _collect(ctx)
+    assert not [s for s in ctx.skipped if s.check == "post-forms"], ctx.skipped
+
+
+def test_the_declined_forms_skip_leaves_dast_active_in_the_ran_list():
+    """Same load-bearing ``check=`` as D71's. An empty one takes the tier out of
+    ``report.scanners_run``, and the tier did run: it crawled the site and tested
+    every GET parameter it found. "We tested some of this" must not render as "we did
+    not run"."""
+    ctx = _ctx(_FormSiteHttp())
+    _collect(ctx)
+    assert all(s.check for s in ctx.skipped if s.scanner == "dast-active"), ctx.skipped
+
+
+def test_the_get_form_is_still_probed_while_the_post_forms_are_declined():
+    """The narrowing is POST-shaped and nothing else. If disclosing it also dropped
+    the GET forms the report would be honest about a gap it had just created."""
+    http = _FormSiteHttp()
+    ctx = _ctx(http)
+    _collect(ctx)
+    assert any("/find" in g["url"] for g in http.active_gets), http.active_gets
+    assert not any("/login" in g["url"] for g in http.active_gets), http.active_gets
+
+
+def test_many_declined_forms_collapse_into_one_skip_that_names_a_bounded_few():
+    """One skip for the site, not one per form: the operator's next action is a single
+    config line. The URL list is capped for the reason ``coverage._MAX_LISTED``
+    exists — a report line naming forty URLs has stopped being a report line — but the
+    counts stay exact, because that is the part that is being summarized."""
+    forms = "".join(
+        f'<form action="/f{i}" method="post"><input name="a{i}" type="text"></form>'
+        for i in range(9)
+    )
+
+    class _ManyForms(_FormSiteHttp):
+        async def get(self, url, *, active=False, params=None, **kwargs):
+            self.gets.append({"url": url, "active": active})
+            path, _ = self._merged(url, params)
+            if path == "/":
+                return _Resp(f"<html><body>{forms}</body></html>")
+            return _Resp("not found", status_code=404)
+
+    ctx = _ctx(_ManyForms())
+    _collect(ctx)
+
+    declined = [s for s in ctx.skipped if s.check == "post-forms"]
+    assert len(declined) == 1, ctx.skipped
+    reason = declined[0].reason
+    assert "9 form(s)" in reason, reason
+    assert "9 input(s)" in reason, reason
+    assert "and 4 more" in reason, reason
+    assert reason.count("https://example.com/f") == 5, reason
+
+
+def test_the_input_count_is_distinct_inputs_not_summed_form_fields():
+    """Two forms posting to one action URL, sharing a field name. Summing the
+    per-form counts says four where the site has three named inputs, and the word in
+    the report is "input" -- a coverage disclosure that overstates its gap is as wrong
+    as one that understates it, because the operator is sizing a decision against that
+    number. (Three inputs, four injection points here: the two forms carry different
+    sibling fields, so ``title`` is probed once per form. The line counts inputs.)"""
+    page = (
+        '<html><body>'
+        '<form action="/save" method="post">'
+        '<input name="title" type="text"><input name="body" type="text"></form>'
+        '<form action="/save" method="post">'
+        '<input name="title" type="text"><input name="tag" type="text"></form>'
+        '</body></html>'
+    )
+
+    class _TwoFormsOneAction(_FormSiteHttp):
+        async def get(self, url, *, active=False, params=None, **kwargs):
+            self.gets.append({"url": url, "active": active})
+            path, _ = self._merged(url, params)
+            return _Resp(page) if path == "/" else _Resp("nf", status_code=404)
+
+    ctx = _ctx(_TwoFormsOneAction())
+    _collect(ctx)
+    declined = [s for s in ctx.skipped if s.check == "post-forms"]
+    assert len(declined) == 1, ctx.skipped
+    assert "2 form(s)" in declined[0].reason, declined[0].reason
+    assert "3 input(s)" in declined[0].reason, declined[0].reason
