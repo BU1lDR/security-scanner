@@ -16,12 +16,13 @@ high. Evidence names the file only; secret *values* are never echoed.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.location import Location
+from scanner.scanners.dast.crawler import why_exception
 
 # An unlikely path used to learn the site's "not found" response.
 _CALIBRATION_PATH = "secscan-calibration-404-do-not-exist-9f3a"
@@ -84,11 +85,51 @@ def _origin(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
 
 
-async def _get(http, url: str):
+@dataclass(frozen=True)
+class ExposedProblem:
+    """A probe that did not complete, which is not a file that is not there.
+
+    ``kind`` is a stable slug, mirroring ``CrawlProblem``, because these are not the
+    same size of thing. ``probe-failed`` is one path this check could not ask about.
+    ``calibration-failed`` is worse: the soft-404 baseline never loaded, so the guard
+    that stops a site answering 200 for everything from becoming three false
+    positives was not in effect for any probe that followed.
+
+    ``detail`` is for a human reading the report and never carries a response body —
+    only exception class names and the URL we asked for.
+    """
+
+    url: str
+    kind: str
+    detail: str
+
+
+@dataclass
+class ExposedResult:
+    """What the probes found, and what they could not ask.
+
+    The second list is why this is a result object rather than a list of findings.
+    This check's entire output is an absence, so "nothing came back" and "nothing is
+    there" render identically unless the failures travel alongside the findings.
+    """
+
+    findings: list[Finding] = field(default_factory=list)
+    problems: list[ExposedProblem] = field(default_factory=list)
+
+
+async def _get(http, url: str) -> tuple[object | None, str | None]:
+    """Fetch one probe as ``(response, None)`` or ``(None, reason)``.
+
+    One probe's failure must not sink the rest — but the bare ``None`` this used to
+    return made "we could not ask" indistinguishable from "the file is not there",
+    and line for line the caller then treated them the same way. A host that refused
+    every connection came back as a clean bill of health for three files nobody had
+    looked at (D66).
+    """
     try:
-        return await http.get(url)
-    except Exception:  # noqa: BLE001 - one probe's failure must not sink the rest
-        return None
+        return await http.get(url), None
+    except Exception as exc:  # noqa: BLE001 - one probe's failure must not sink the rest
+        return None, why_exception(exc)
 
 
 def _matches_baseline(baseline, signature: Callable[[str], bool]) -> bool:
@@ -101,16 +142,31 @@ def _matches_baseline(baseline, signature: Callable[[str], bool]) -> bool:
     )
 
 
-async def probe_exposed_files(url: str, http) -> list[Finding]:
+async def probe_exposed_files(url: str, http) -> ExposedResult:
     origin = _origin(url)
-    baseline = await _get(http, origin + _CALIBRATION_PATH)
+    result = ExposedResult()
 
-    findings: list[Finding] = []
+    calibration_url = origin + _CALIBRATION_PATH
+    baseline, why = await _get(http, calibration_url)
+    if why is not None:
+        # Not one missing data point among four. Without a baseline
+        # ``_matches_baseline`` returns False for every probe, so the precision guard
+        # is off rather than absent-and-announced — and it fails in the loud
+        # direction, which is the one nobody investigates for being too quiet.
+        result.problems.append(ExposedProblem(
+            calibration_url, "calibration-failed",
+            f"the soft-404 baseline could not be fetched, so any hit below is "
+            f"unfiltered: {why}",
+        ))
+
     seen: set[str] = set()
     for probe in _PROBES:
         target = origin + probe.path
-        resp = await _get(http, target)
-        if resp is None or resp.status_code != 200:
+        resp, why = await _get(http, target)
+        if why is not None:
+            result.problems.append(ExposedProblem(target, "probe-failed", why))
+            continue
+        if resp.status_code != 200:
             continue
         if not probe.signature(resp.text):
             continue
@@ -121,7 +177,7 @@ async def probe_exposed_files(url: str, http) -> list[Finding]:
         if key in seen:
             continue
         seen.add(key)
-        findings.append(Finding(
+        result.findings.append(Finding(
             rule_id=probe.rule_id,
             title=probe.title,
             severity=probe.severity,
@@ -133,4 +189,4 @@ async def probe_exposed_files(url: str, http) -> list[Finding]:
             references=list(_REF),
             fix=None,
         ))
-    return findings
+    return result

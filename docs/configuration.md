@@ -188,7 +188,7 @@ you have a specific need for it to be ambient.
 | --- | --- | --- |
 | `dast.enabled` | `true` | |
 | `dast.tls.enabled` | `true` | Certificate and protocol checks, against the origin the entry URL *landed* on. An `http://` target that redirects to HTTPS is checked, which is the ordinary shape of a site that has configured TLS correctly; it used to be reported as having no certificate to read. |
-| `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups), at the origin the entry URL landed on. Still one origin, still only a host `scope.allowed_hosts` permits. |
+| `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups), at the origin the entry URL landed on. Still one origin, still only a host `scope.allowed_hosts` permits. A probe that cannot complete is reported as an error and exits `3` rather than counting as "the file is not there" — see D66. |
 | `dast.crawler.max_depth` | `2` | Link depth from the entry URL. Redirects do not spend a level: a site that bounces its own root would otherwise arrive at its front page having used one of your two. |
 | `dast.crawler.max_pages` | `50` | Hard page ceiling. Every request counts, redirect hops included — a hop is traffic to someone else's machine, which is what this bounds. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
 | `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. Widens `scope.allowed_hosts` only — never `scope.active_allowlist`, so no probe reaches a host you did not name. Lookalikes are not subdomains: `notexample.com` stays out. |

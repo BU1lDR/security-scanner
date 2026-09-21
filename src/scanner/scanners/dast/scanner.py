@@ -154,4 +154,16 @@ class DastScanner(Scanner):
                 check="exposed",
             )
             return []
-        return await probe_exposed_files(url, ctx.http)
+        if ctx.http is None:
+            ctx.emit_skip(
+                "dast", "no HTTP client was wired, so there was nothing to probe with",
+                check="exposed",
+            )
+            return []
+        result = await probe_exposed_files(url, ctx.http)
+        for problem in result.problems:
+            # emit_failure, not a log. This check answers by finding nothing, so a
+            # probe that never completed subtracts from coverage without subtracting
+            # from the report, and the run has to say so (D59, D66).
+            ctx.emit_failure("dast", "exposed", f"{problem.kind}: {problem.url} — {problem.detail}")
+        return result.findings

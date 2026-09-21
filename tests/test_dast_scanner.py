@@ -321,6 +321,40 @@ def test_the_exposed_file_probe_follows_the_redirect_to_the_real_origin():
     assert "https://example.com/.env" not in http.gets
 
 
+def test_exposed_probes_that_never_completed_are_errors_not_a_clean_result():
+    """The wiring, not the probe. `probe_exposed_files` now hands back the probes it
+    could not complete, and that is worth nothing unless the caller puts them on the
+    same channel a crash uses -- these have to reach the report and push the run to
+    exit 3, because this check answers by finding nothing and an unreachable host
+    would otherwise render exactly like a secured one (D66)."""
+    class _DeadProbes(_FakeHttp):
+        async def get(self, url, **kwargs):
+            if url == self.entry_url:
+                return await super().get(url, **kwargs)
+            raise OSError("[Errno 111] Connection refused")
+
+    url = "https://example.com/"
+    ctx = _ctx(url, _DeadProbes(url, _Resp(200, headers={})))
+    _collect(ctx)
+    exposed = [e for e in ctx.errors if e.check == "exposed"]
+    # Three probe paths plus the calibration fetch.
+    assert len(exposed) == 4, [e.message for e in exposed]
+    assert all("Connection refused" in e.message for e in exposed)
+    assert sum("calibration-failed" in e.message for e in exposed) == 1
+
+
+def test_no_http_client_makes_the_exposed_probe_skip_rather_than_fail_four_times():
+    """A missing client is not four dead probes, it is a check that never ran -- the
+    same distinction the TLS probe beside it already draws, and the reason `skipped`
+    and `errors` are separate channels."""
+    url = "https://example.com/"
+    ctx = _ctx(url, _FakeHttp(url, _Resp(200, headers={})))
+    ctx.http = None
+    _collect(ctx)
+    assert [s.check for s in ctx.skipped if s.check == "exposed"] == ["exposed"]
+    assert [e for e in ctx.errors if e.check == "exposed"] == []
+
+
 def test_a_broken_redirect_on_the_entry_url_is_an_error_not_a_silent_stub():
     """All that can be graded is the stub, so the findings are about the stub --
     and the report has to say so, because a 302 with no Location means the page

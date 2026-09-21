@@ -1145,15 +1145,33 @@ def phase_d(checks: Checks, config_path: Path) -> None:
     checks.expect(code == 3, f"unreachable target exits 3 (got {code})",
                   f"errors={len(errors)}, findings={len(findings)}")
     # D2: the message text is platform/anyio wording and is deliberately not
-    # asserted; the scanner/check pairs are ours. Both tiers must speak up. The
+    # asserted; the scanner/check pairs are ours. Every tier must speak up. The
     # passive tier's failed GET was always recorded; the active tier's crawl failure
     # was not, and that silence is what made a host that never answered a single
-    # packet produce an actively-scanned, clean-looking report (D59).
+    # packet produce an actively-scanned, clean-looking report (D59). The
+    # exposed-file probes were the last ones still silent here, and they are the
+    # worst case of it: that check reports by finding nothing, so before D66 a host
+    # that refused every connection said `.env` and `.git/` were not public.
+    pairs = sorted((e.get("scanner"), e.get("check")) for e in errors)
     checks.expect(
-        sorted((e.get("scanner"), e.get("check")) for e in errors)
-        == [("dast", "response"), ("dast-active", "crawl")],
-        "and both tiers record what they could not reach",
+        sorted(set(pairs))
+        == [("dast", "exposed"), ("dast", "response"), ("dast-active", "crawl")],
+        "and every tier records what it could not reach",
         repr(errors)[:400],
+    )
+    # D2b: one entry per probe path plus one for the lost soft-404 baseline, each
+    # naming a distinct URL. Counted from the messages rather than hardcoded at
+    # four, so adding a probe path does not need this file edited -- but *not*
+    # loosened to "at least one", because the failure that mattered was three
+    # probes going quiet while a fourth spoke.
+    exposed = [e.get("message", "") for e in errors if e.get("check") == "exposed"]
+    urls = {m.split(" ")[1] for m in exposed if len(m.split(" ")) > 1}
+    checks.expect(
+        len(urls) == len(exposed)
+        and sum(m.startswith("calibration-failed") for m in exposed) == 1
+        and sum(m.startswith("probe-failed") for m in exposed) == len(exposed) - 1,
+        "naming every probe it could not send, and the lost calibration once",
+        *[m[:100] for m in exposed],
     )
     # D3: 1 outranking 3 is only safe while this holds.
     checks.expect(not findings, "with no findings to mask them",

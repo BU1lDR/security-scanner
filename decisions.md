@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 548 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 554 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1708,6 +1708,82 @@ file that says "frozen" and is enforced by nothing is worse than one that says n
 because it invites the next person to build against it. The argument this project makes
 about its own scanner is that a claim nobody can check is not evidence, and that
 standard has to apply hardest to the file that tells everyone else what the shapes are.
+
+---
+
+### D66 — A probe that could not connect reported the file as not exposed
+
+**One line held the whole defect.** `exposed.py`'s `_get` caught every exception and
+returned `None`, and the caller read `if resp is None or resp.status_code != 200:
+continue`. A request that never completed and a server that answered "404, no such
+file" took the same branch. This check's entire output is an absence — it reports by
+finding nothing — so a host that refused all four connections produced a clean bill of
+health for `.env`, `.git/config` and `.git/HEAD`, byte-identical to the report from a
+properly-secured site. The same loud-failure rule as D59, one file further along.
+
+**There was a test, and it pinned the acceptable half.**
+`test_a_probe_error_does_not_abort_the_rest` made one probe raise and asserted the other
+findings still came back. That is correct and worth keeping: one dead probe must not
+sink the rest. But "kept going" was the whole assertion, and "kept going silently" is
+the part that was wrong. A test named after the resilience of a loop is not a test of
+what the loop reports, and this one had been green since the check was written.
+
+**The calibration failure is the same bug pointing the other way.** Before probing, the
+check fetches a deliberately-unlikely path to learn what "not here" looks like on this
+site, so that a server answering `200` for everything does not become three false
+positives. If that one fetch raised, `baseline` was `None`, `_matches_baseline` returned
+`False` for every probe, and the precision guard was simply off — with nothing in the
+report saying so. It is recorded as its own kind, `calibration-failed`, because it does
+not cost one data point among four: it changes the meaning of every probe after it, and
+it fails in the *loud* direction, which is the direction nobody investigates.
+
+**The channel already existed and did not need inventing.** `ctx.emit_failure` was built
+in D59 for exactly this shape — "a crawl hands back the list of pages it could not read,
+having deliberately kept walking past each one" — so `probe_exposed_files` now returns an
+`ExposedResult` carrying findings and problems, mirroring `CrawlResult`, and the caller
+in `dast/scanner.py` emits one failure per problem. That puts them where a crash goes,
+which pushes the run to exit `3` (D54): the report is real but it is not a complete
+answer.
+
+**A missing HTTP client is a skip, not four failures.** If nothing was wired there is
+nothing to probe with, and the check never ran — which is a different statement from four
+probes that ran and died, and belongs in `skipped` rather than `errors`. The TLS probe
+beside it already drew that line; this one now does too.
+
+**`_why` became `why_exception`.** The crawler's one-line exception describer is exactly
+the convention needed here, and its docstring says why it exists: several httpx
+exceptions stringify to empty, and `ConnectTimeout` versus `ConnectError` is the
+difference between two remedies. Importing a private name across modules is a smell and
+copying it is worse, because two descriptions of how a failure reaches an operator
+drift apart. One definition, made public, named for what it does.
+
+**Four mutations, four red runs** (D57). Stopping the caller from emitting the failures
+reddens the wiring test. Folding probe failures back into the `status_code != 200` branch
+— the original defect, restored exactly — reddens three. Dropping the calibration record
+reddens three. Removing the no-client guard reddens the skip test. And the suite gained
+a positive control on the other side: a fully-reachable site must report *no* problems,
+because a channel that says "incomplete" on every scan says nothing on any of them.
+
+**The rehearsal's dead-port phase already covered this and was passing.** Its assertion
+listed the `(scanner, check)` pairs a host that never answers must produce, exactly, and
+that exact form is what caught the change rather than waving it through — the pairs were
+`dast/response` and `dast-active/crawl`, and the exposed probes were the tier still
+missing from a list whose whole point was that every tier speaks up. Measured on a bound
+but never-listening port: one error before, five after, exit `3` both times. The list now
+includes `dast/exposed`, and a second assertion requires one entry per probe path plus
+the lost calibration exactly once, each naming a distinct URL — counted from the messages
+rather than hardcoded at four, so adding a probe path does not need that file edited, but
+deliberately not loosened to "at least one", because the failure that mattered was three
+probes going quiet while a fourth spoke. Both go red when the caller stops emitting, over
+a real socket. 49 assertions to 50.
+
+**Why:** This is the sixth time in this log that the bug was not in what the scanner
+looked for but in what it did with not being able to look. The pattern is always the
+same: a `try` that returns a falsy value, a caller that cannot tell that value apart
+from a real negative, and a test that checks the loop survived rather than what the loop
+said. The answer is always the same too — carry the failure out alongside the result and
+make the caller decide — and the reason to keep writing it down is that the next
+occurrence will look like ordinary defensive code, because all of these did.
 
 ---
 

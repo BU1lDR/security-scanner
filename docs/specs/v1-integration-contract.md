@@ -466,6 +466,14 @@ is unchanged and still refuses the rest. It is reconnaissance against the
 *already-authorized* target, so it stays passive-tier; it is not attack-style
 input. Config flag `dast.exposed.enabled` can turn it off.
 
+A probe that does not complete is reported, not counted as an absence. This check
+answers by finding nothing, so a refused connection and a properly-secured file
+rendered identically until D66: every failed probe, and a failed soft-404 calibration,
+now reaches the same error channel a crash uses and pushes the run to exit `3`. A
+failed calibration is called out separately because it does not cost one data point —
+it disables the precision guard for every probe after it, which fails loud rather than
+quiet and so goes uninvestigated.
+
 **Crawler → active bridge:** the passive crawler produces `Page`/`Form` records.
 The active tier needs `InjectionPoint`s. The transform (one InjectionPoint per
 (request, param) pair, hidden/CSRF fields preserved) is owned by the active

@@ -122,12 +122,16 @@ def _is_html(resp) -> bool:
     return "html" in ctype.lower()
 
 
-def _why(exc: BaseException) -> str:
+def why_exception(exc: BaseException) -> str:
     """An exception as one short line, class name included.
 
     The class name is not decoration: ``ConnectTimeout`` and ``ConnectError`` carry
     different remedies, and several httpx exceptions stringify to the empty string,
     which would otherwise reach a report as a blank reason.
+
+    Public, and named rather than left as ``_why``, because ``exposed.py`` needs the
+    same convention (D66) and two copies of "how a failure is described to the
+    operator" is how the two descriptions drift apart.
     """
     text = str(exc).strip()
     return f"{exc.__class__.__name__}: {text}" if text else exc.__class__.__name__
@@ -151,7 +155,7 @@ async def _get(http, url: str, headers: dict | None) -> tuple[object | None, str
             return await http.get(url, headers=headers), None
         return await http.get(url), None
     except Exception as exc:  # noqa: BLE001 - reported to the caller, not swallowed
-        return None, _why(exc)
+        return None, why_exception(exc)
 
 
 def _extract_links(
@@ -173,7 +177,7 @@ def _extract_links(
             target = urljoin(base_url, href)
             scheme = urlsplit(target).scheme
         except ValueError as exc:
-            bad.append((str(href)[:120], _why(exc)))
+            bad.append((str(href)[:120], why_exception(exc)))
             continue
         if scheme in HTTP_SCHEMES:
             links.append(target)
@@ -197,7 +201,7 @@ def _extract_forms(
             action = urljoin(base_url, raw_action)
             in_scope = scope.allows(action)
         except ValueError as exc:
-            bad.append((str(raw_action)[:120], _why(exc)))
+            bad.append((str(raw_action)[:120], why_exception(exc)))
             continue
         if not in_scope:
             continue  # can't test what we're not allowed to reach
@@ -323,7 +327,7 @@ async def _walk(
                     queueable = scope.allows(link) and _normalize(link) not in visited
                 except ValueError as exc:
                     result.problems.append(CrawlProblem(
-                        url, "bad-link", f"href {link[:120]!r}: {_why(exc)}",
+                        url, "bad-link", f"href {link[:120]!r}: {why_exception(exc)}",
                     ))
                     continue
                 if queueable:
@@ -384,5 +388,5 @@ async def crawl(
         # it and not the thirty-nine before it. Returning an empty result from here
         # would hand the active tier zero injection points and the report would then
         # describe a fully-scanned site with nothing wrong with it.
-        result.problems.append(CrawlProblem(entry_url, "crawl-failed", _why(exc)))
+        result.problems.append(CrawlProblem(entry_url, "crawl-failed", why_exception(exc)))
     return result
