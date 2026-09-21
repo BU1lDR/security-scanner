@@ -13,6 +13,7 @@ from scanner.core.finding import (
 )
 from scanner.core.fix import Fix, FixKind
 from scanner.core.location import Location
+from scanner.scanners.dast.cookies import check_cookies
 
 
 def _minimal_finding(**overrides) -> Finding:
@@ -257,13 +258,32 @@ def test_a_bounded_fragment_is_short_enough_to_leave_room_for_our_own_prose():
     fragment that fits with nothing left over for the sentence around it. With the
     loose version, any FRAGMENT_MAX_LEN in 158..199 (or any TITLE_MAX_LEN under
     163) left the whole suite green while every hostile-name cookie title became
-    padding plus a truncation marker, saying nothing about what was found. The
-    wrapper is measured from the longest title any check builds rather than
-    hardcoded, so editing that sentence re-checks the bound instead of silently
-    eating the slack.
+    padding plus a truncation marker, saying nothing about what was found.
+
+    The wrapper is now *called for* rather than quoted here. It used to be a string
+    literal with a ``# dast/cookies.py`` comment beside it, which is a restatement of
+    code and went stale the moment D77 added a title one character longer: the
+    assertion still passed, so the property this test claims to check had quietly
+    stopped being the property it checked. Asking the checks themselves means editing
+    one of those sentences re-measures the bound instead of eating the slack.
+
+    The cookie checks are the whole of the search space, and that is verifiable rather
+    than assumed: ``bounded`` is called at three places in the scanners, two of them
+    here and the third on ``InjectionPoint.param`` in the active checks, whose titles
+    are fixed strings that interpolate nothing.
     """
-    longest_title = "Cookie '{}' is missing the SameSite attribute"  # dast/cookies.py
-    wrapper = len(longest_title.format(""))
+    # One-character name, so every title is exactly wrapper + 1 long. The three raws
+    # are what it takes to reach all five cookie titles at least once.
+    titles = [
+        f.title for raw in (
+            "N=v",                                   # secure, httponly, samesite absent
+            "N=v; Secure; HttpOnly; SameSite=None",  # the explicit opt-out
+            "N=v; Secure; HttpOnly; SameSite=x",     # a value no client recognizes
+        )
+        for f in check_cookies("https://example.com/", [raw])
+    ]
+    assert len(titles) == 5, "a cookie title stopped being reachable from these raws"
+    wrapper = max(len(t) for t in titles) - len("N")
 
     assert len(bounded("x" * 5000, FRAGMENT_MAX_LEN)) == FRAGMENT_MAX_LEN
     assert FRAGMENT_MAX_LEN + wrapper <= TITLE_MAX_LEN

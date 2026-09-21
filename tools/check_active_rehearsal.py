@@ -148,6 +148,15 @@ BOUNDED_LONG_NAME = "n" + "A" * 104 + "... (truncated)"
 COOKIE_NAME = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 COOKIE_REDACTED = "ghp_" + "*" * 36
 
+# A second cookie, on the 302 rather than on "/", with one thing wrong with it and
+# that one thing invisible to the check this tool shipped with. Over plain HTTP,
+# HttpOnly present and SameSite present, it scored a clean bill: the value said
+# None, which is the setting that turns off the protection the attribute exists to
+# give, and nothing read the value (D77). Served on a redirect hop because that is
+# the only other response the passive tier grades cookies on, so one cookie buys
+# the new rule and the every-hop path at once.
+OPTED_OUT_COOKIE = "sess_optout"
+
 # Shapeless strings planted in /report's database error. They are what a real
 # error page leaks -- a row's own data and the failing query -- and no redaction
 # layer can recognise them, so their absence from the report is a real result
@@ -340,8 +349,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             # A token-shaped cookie *name*, chosen by the target, so scrub()
             # runs on live text rather than on a fixture. SameSite is present
-            # and Secure is not applicable over http, so exactly one cookie
-            # finding is produced and its param is the masked name.
+            # and protective, and Secure is not applicable over http, so this
+            # cookie's only finding is the missing HttpOnly -- which also makes
+            # it the negative control for A33: it must not pick up a SameSite
+            # finding now that the value is read as well as counted.
             return self._send(200, index_page().encode(), extra={
                 "Set-Cookie": f"{COOKIE_NAME}=1; SameSite=Lax; Path=/",
             })
@@ -354,7 +365,17 @@ class Handler(BaseHTTPRequestHandler):
             # control goes to zero. That is D57's rule -- what a gate needs is a
             # route, not another assertion -- and it is also what the real web
             # looks like, which is the thing this file exists to rehearse.
-            return self._send(302, b"", extra={"Location": "/"})
+            #
+            # It also carries OPTED_OUT_COOKIE, because a Set-Cookie on a 302 is
+            # the ordinary shape of a login and this one is the shape D77 found:
+            # HttpOnly set, SameSite set, and set to the value that means "send
+            # me cross-site". A unit test hands the cookie check a list of
+            # strings; only a real server proves httpx's get_list("set-cookie")
+            # hands it the header this hop actually sent.
+            return self._send(302, b"", extra={
+                "Location": "/",
+                "Set-Cookie": f"{OPTED_OUT_COOKIE}=1; HttpOnly; SameSite=None; Path=/",
+            })
         if path == "/forms":
             return self._send(200, FORMS_PAGE.encode())
         if path == "/home":
@@ -754,10 +775,20 @@ def phase_a(checks: Checks, url: str, config_path: Path,
     # so this is the cause A5 would otherwise report as a symptom. Both tiers
     # follow it, so "/" is fetched twice and the stub is never graded: the
     # header findings below are located on the page, not on the redirect.
+    #
+    # Cookies are exempt, and this is the design rather than an exception carved
+    # out to keep an assertion green. A Set-Cookie on a 302 is the ordinary shape
+    # of a login, so `_response_checks` grades cookies on every hop and locates
+    # each finding on the response that actually sent the header -- contract §8
+    # keys dedup on location, so pooling them would collapse two insecure cookies
+    # from two hops into one. A cookie finding on the stub is therefore correct;
+    # what must not be on the stub is anything that grades the *document*, which
+    # is what the headers and the fingerprint do.
     entry_path = urlsplit(url).path
     landed = [r for r in wire if urlsplit(r["path"]).path == "/"]
     graded_stub = [f for f in findings
-                   if (f.get("location") or {}).get("url", "").endswith(entry_path)]
+                   if (f.get("location") or {}).get("url", "").endswith(entry_path)
+                   and not (f.get("rule_id") or "").startswith("dast.cookies.")]
     checks.expect(
         len(landed) == 2 and not graded_stub,
         f"the {entry_path} redirect was followed by both tiers",
@@ -1018,6 +1049,37 @@ def phase_a(checks: Checks, url: str, config_path: Path,
         not post_skips,
         "include_post = true reports no declined-forms gap",
         f"skipped={post_skips!r} on a run that probed the comment form",
+    )
+    # A31: the cookie on the 302 whose SameSite value opted out of the protection.
+    # Over plain HTTP with HttpOnly set, this cookie produced no finding at all
+    # before D77 -- Secure does not apply, HttpOnly is there, and the SameSite check
+    # asked only whether the attribute was present.
+    cookies = {(f.get("location") or {}).get("param"): f
+               for f in findings if (f.get("rule_id") or "").startswith("dast.cookies.")}
+    optout = [f for f in findings
+              if f.get("rule_id") == "dast.cookies.samesite-none"
+              and (f.get("location") or {}).get("param") == OPTED_OUT_COOKIE]
+    checks.expect(
+        len(optout) == 1,
+        "the cookie that opted out of SameSite is reported",
+        f"dast.cookies params seen: {sorted(k for k in cookies if k)!r}",
+    )
+    # A32: and the sentence carries the half nothing else says over plain HTTP.
+    # `missing-secure` is HTTPS-only by design, so without this clause the report
+    # never mentions that browsers requiring the pairing drop the cookie outright.
+    checks.expect(
+        optout and "discard" in (optout[0].get("evidence") or ""),
+        "and says the missing Secure discards it",
+        *[f"evidence={(f.get('evidence') or '')[:200]!r}" for f in optout],
+    )
+    # A33: the negative control. "/" serves SameSite=Lax, and a check that reports
+    # every cookie it reads is not reading the value either.
+    lax = [f for f in findings
+           if (f.get("rule_id") or "").startswith("dast.cookies.samesite")
+           and (f.get("location") or {}).get("param") == COOKIE_REDACTED]
+    checks.expect(
+        not lax, "the SameSite=Lax cookie gets no SameSite finding",
+        *[f"unexpected {f.get('rule_id')}" for f in lax],
     )
     return len(probes)
 

@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 642 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 652 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2494,6 +2494,102 @@ asked to account for itself. The reason the quiet one stayed quiet is instructiv
 a correct argument had been made in its defence — depth is a shape, not a failure —
 and that argument settled the question of the *exit code* while being mistaken for
 settling the question of whether to say anything at all. Suite 632 to 642.
+
+---
+
+### D77 — The cookie check read SameSite's presence and never its value
+
+**Two of the three attributes have no value; the third has three.** `Secure` and
+`HttpOnly` are bare flags, so asking whether they are there is the whole of asking
+whether they are set. `SameSite` carries a value, and one of its values —
+`SameSite=None` — is the explicit instruction to send the cookie on cross-site
+requests, which is the protection the attribute exists to provide. `_parse_cookie`
+returned a set of attribute *names* and its docstring stated the assumption it was
+built on: "the value itself is not needed for a presence check."
+
+**So the check was inverted on the case that matters.** Measured on one cookie,
+five spellings, before the fix: `sid=abc; Secure; HttpOnly` reported
+`missing-samesite`; `sid=abc; Secure; HttpOnly; SameSite=None` reported nothing at
+all. Chromium-family browsers default an *absent* `SameSite` to `Lax`, so the tool
+raised a finding against the cookie the browser protects and stayed silent on the
+cookie that is sent cross-site everywhere. `SameSite=Bogus` and a bare `SameSite`
+with no value also scored clean, and a client falls back to its own default for both
+of those exactly as though nothing had been sent.
+
+**The worst row was on plain HTTP.** `http://host/` setting
+`sess=1; HttpOnly; SameSite=None` produced an empty findings list: `Secure` does not
+apply over HTTP so `missing-secure` is deliberately not raised, `HttpOnly` is
+present, and the SameSite attribute was counted rather than read. Browsers require
+`Secure` alongside `SameSite=None` and discard the cookie without it, so that
+operator had neither the cross-site cookie they configured nor the protection they
+gave up to get it, and the report named nothing.
+
+**Three exclusive branches, one rule ID each.** Absent, opted out, misspelled. The
+operator's next edit differs for each — add the attribute, change its value, fix the
+spelling — so no cookie produces two of them. The absent case is unchanged and still
+a finding, because the `Lax` default is the browser's and not the site's: an older
+client sends the cookie cross-site and the response header never said not to.
+`samesite-none` is reported at the same severity as the absent case rather than a
+higher one, asserted against that rule instead of a literal, because it is the same
+exposure and not a worse one. The missing-`Secure` pairing is said in the evidence
+rather than raised in severity: a cookie the browser throws away is not a larger
+exposure than one it keeps, it is a configuration that is not in force, and the
+sentence is what the reader needs.
+
+**The value is the target's text, and bounding it at the fragment is load-bearing
+for a reason the name's bound is not.** The `evidence` cap would keep the field
+short either way. It would keep it short by cutting the sentence off after the
+quoted value, and the clause it cuts is the one that says why an unrecognized value
+matters — so a 4000-character value bounded only at the field yields a finding that
+recites the hostile string and then stops. The value never reaches `location.param`,
+which stays the cookie name, because contract §8 keys dedup on location.
+
+**A green test had been restating code, and this change is what exposed it.**
+`test_a_bounded_fragment_is_short_enough_to_leave_room_for_our_own_prose` claims to
+measure the longest title any check builds against `FRAGMENT_MAX_LEN`, and did it
+with a string literal and a `# dast/cookies.py` comment beside it. Adding a title
+one character longer left the assertion passing while the property it asserts had
+stopped being the property it checked. It now asks `check_cookies` for its titles.
+Proof rather than assertion: a mutation growing a cookie title to 88 characters of
+prose around a 120-character fragment — eight over `TITLE_MAX_LEN`, so a hostile
+name eats the sentence — is GREEN against the old literal and RED against the
+measured version. Every length assertion elsewhere in the suite stays green for it,
+because the field cap does its job; only a test that asks the checks what they build
+can see it. The first attempt at that mutation was 79 characters and stayed green
+correctly, the slack being `TITLE_MAX_LEN - FRAGMENT_MAX_LEN = 80`.
+
+**Eighteen mutations, ten new tests.** The presence check restored; the
+unrecognized branch removed; the absent case dropped; both findings emitted for one
+cookie; each new rule at the wrong severity; either comparison done without
+lowering; a repeated attribute graded first-wins instead of last-wins; the parser
+dropping every value; the discard clause never appearing and always appearing; the
+value not quoted back; a bare attribute rendered as `SameSite=`; `Strict` dropped
+from the remediation; the value interpolated unbounded; the value used as the
+location; and the title grown past the slack. All eighteen fail. One earlier
+candidate — adding `none` to `_SAMESITE_PROTECTIVE` — survived and was replaced
+rather than kept: that set is only reached after the `None` branch has returned, so
+the mutation changes no behaviour, and a mutation that changes nothing is not
+evidence about the tests.
+
+**Rehearsed over a real socket.** A unit test hands the cookie check a list of
+strings, so "httpx gave us the header the server sent" is otherwise a claim about a
+fixture. The rehearsal's `/enter` 302 now carries
+`sess_optout=1; HttpOnly; SameSite=None`, which is both the shape this entry is
+about and the every-hop path — a `Set-Cookie` on a redirect is the ordinary shape of
+a login, and that hop is the only response besides the landing page on which the
+passive tier grades cookies. A31 asserts the finding, A32 the discard clause, A33
+that the `SameSite=Lax` cookie on `/` picks up nothing, since a check that reports
+every cookie it reads is not reading the value either. A4b needed narrowing for it:
+it asserted that no finding is located on the redirect stub, where what it means is
+that nothing grading the *document* is, and a cookie finding on the hop that set the
+cookie is `_response_checks`'s deliberate design. Rehearsal 59 assertions to 62.
+
+**Why:** The reason this one lasted is that it was a presence check among presence
+checks, sitting third in a list of three and written in the same shape as the two
+above it — which are complete, because their attributes carry nothing to read. A
+value graded as a flag reports the default as a defect and the opt-out as compliance,
+and both halves of that were in the report all along, one line apart. Suite 642 to
+652.
 
 ---
 
