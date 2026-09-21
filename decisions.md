@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **`main` is the current build; `v1.3.1` is the newest tag and carries none of the work since it.** Tagging stopped after it, so the tag list is a history and not a pointer at the present — read this file and the code, not the Releases tab. All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 652 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 is superseded by v1.1.1 and v1.3.1 by `main`, and in both cases the release page itself says so rather than only this file.
+**Status:** **`main` is the current build; `v1.3.1` is the newest tag and carries none of the work since it.** Tagging stopped after it, so the tag list is a history and not a pointer at the present — read this file and the code, not the Releases tab. All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 659 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 is superseded by v1.1.1 and v1.3.1 by `main`, and in both cases the release page itself says so rather than only this file.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside. The claim is now gone from the line above rather than guarded, which is the cheaper answer: it names which *branch* is current, and that is derivable. Once tagging stopped, "v1.3.1 is the current release" beside a test count from twenty-six commits later was the same conflation the Releases tab was making — a name someone attached to an old commit, read as a description of the present.
 
@@ -2665,6 +2665,59 @@ carried out and a guarantee that holds by coincidence fail the same way: both
 look correct from inside the machine where they happen to be true, and neither
 leaves anything behind to check. A repository that can only be contributed to
 correctly from one laptop is not more portable for having produced no errors yet.
+
+---
+
+### D80 — Three of the four dependency tables in `pyproject.toml` went unread in silence
+
+**`parse_pyproject` reads `[project]` and nothing else, and only one of the other
+three declaration sites was ever reported.** [D42]'s rule is that "we found
+nothing" and "we could not look" must never produce the same output, and
+`pyproject_coverage_gap` enforced it for exactly one shape: a Poetry project
+declaring under `[tool.poetry.dependencies]` with no PEP 621 table at all. Two
+shapes were invisible. `[dependency-groups]` — PEP 735, accepted in 2024 and what
+`pip install --group` and `uv` read — is a *top-level* table holding the same PEP
+508 strings as `[project.dependencies]`, so a parser looking under `[project]`
+never reaches it. `[tool.poetry.group.<name>.dependencies]`, which is how Poetry
+1.2 onwards declares dev and test dependencies, has no PEP 621 equivalent at all.
+
+**Both are worse than the shape that was covered, because the file is half read.**
+The old check returned `None` the moment `[project].dependencies` existed, on the
+reasoning that those dependencies *were* read — true of them, and irrelevant to
+the group tables sitting beside them. Measured on a `pyproject.toml` declaring
+`flask==2.0.1` under `[project]` and `jinja2==3.0.0` under `[dependency-groups]`:
+one OSV query went out, for flask, and the report carried no finding and no gap.
+A reader comparing that report against the file would have had to know which
+tables this scanner reads to see anything missing. An unrecognized manifest at
+least leaves no false impression; a partially read one presents a complete answer.
+
+**`pyproject_coverage_gaps` now returns a list, at most one gap per label.** The
+Poetry early-out survives for `[tool.poetry.dependencies]`, because Poetry treats
+`[project].dependencies` as authoritative when both are present; the two group
+tables are reported whenever they hold anything, regardless of what else was read.
+Both Poetry forms share the `Poetry` label so a file using both produces one
+finding naming it once rather than two naming it twice. An empty declared table is
+not a gap — it hides nothing, and a finding a reader learns to skip costs more than
+it pays. A `_table` helper coerces non-table values instead of trusting the shape:
+this check runs outside the caller's per-manifest parse guard, so an
+`AttributeError` from a `[tool]` key holding a string would escape to `scan()`'s
+backstop and lose every other manifest with it, which is the failure [D69] closed.
+
+**The remediation stopped naming `poetry export` at everyone.** It was a single
+hardcoded example on every gap where the ecosystem *is* checked and only the
+format is not — including Pipenv's, whose reader does not have that command.
+`_EXPORT_HINT` is keyed by label, and a label with no verified command now gets the
+sentence without an example, because a plausible command for the wrong tool is
+worse than none on the one line in a finding whose whole purpose is to be acted on.
+
+**Why:** Every defect [D42] has produced since has been the same one at a
+different depth — the manifest, then the file, then the line ([D74]), and now the
+*table*. Each layer looked complete from the layer above it, which is why finding
+one is never evidence that the rest are covered: the question is not "does this
+tool report what it cannot read" but "at what granularity does it stop being able
+to tell." Seven tests and six seeded mutations pin this layer; the parser's reach
+is still a declared scope rather than a guess, and the gap is what makes the scope
+legible from the report instead of only from this file.
 
 ---
 

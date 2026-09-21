@@ -56,7 +56,7 @@ from scanner.scanners.sca.manifests import (
     UnresolvedDeclaration,
     discover,
     parse_manifest,
-    pyproject_coverage_gap,
+    pyproject_coverage_gaps,
 )
 from scanner.scanners.sca.osv import OsvClient, Vulnerability
 
@@ -282,9 +282,7 @@ class ScaScanner(Scanner):
                 )
                 continue
             if path.name == "pyproject.toml":
-                gap = pyproject_coverage_gap(str(path), text)
-                if gap is not None:
-                    gaps.append(gap)
+                gaps.extend(pyproject_coverage_gaps(str(path), text))
             try:
                 parsed = parse_manifest(str(path), text, unresolved=unresolved)
             except Exception as exc:

@@ -170,6 +170,134 @@ def test_pyproject_declaring_only_poetry_deps_is_reported(tmp_path):
     assert gaps[0].location.path.endswith("pyproject.toml")
 
 
+def test_pep_735_groups_are_reported_even_though_the_project_table_was_read(tmp_path):
+    # Worse than the Poetry case above, because half the file *is* read. PEP 735
+    # puts dependencies in a top-level [dependency-groups] table holding the same
+    # PEP 508 strings as [project.dependencies], and parse_pyproject looks only
+    # under [project]. The scan therefore queried flask and never saw jinja2, and
+    # said nothing to distinguish that from a project whose only dep is flask.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["flask==2.0.1"]\n\n'
+        '[dependency-groups]\ndev = ["jinja2==3.0.0"]\n',
+        encoding="utf-8",
+    )
+    http = _FakeHttp()
+
+    findings, _ = _scan(tmp_path, http)
+
+    gaps = _by_rule(findings, _UNSUPPORTED)
+    assert len(gaps) == 1
+    assert "PEP 735" in gaps[0].title
+    # The half that was read, and only that half, reached OSV. This is the
+    # measurement the finding exists to disclose, not a restatement of it.
+    queried = {
+        q["package"]["name"] for _, body in http.posts for q in body["queries"]
+    }
+    assert queried == {"flask"}
+
+
+def test_a_pyproject_of_nothing_but_dependency_groups_is_not_reported_as_clean(tmp_path):
+    # The tooling-only repo: every dependency it has is in a PEP 735 group, so the
+    # old code parsed the file to zero deps and emitted nothing at all.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\n\n'
+        '[dependency-groups]\ntest = ["pytest==8.0.0"]\nlint = ["ruff==0.5.0"]\n',
+        encoding="utf-8",
+    )
+
+    findings, _ = _scan(tmp_path)
+
+    gaps = _by_rule(findings, _UNSUPPORTED)
+    assert len(gaps) == 1
+    assert "PEP 735" in gaps[0].title
+    assert gaps[0].severity is Severity.INFO
+    assert "not evidence" in gaps[0].remediation
+
+
+def test_poetry_dev_groups_are_reported_even_when_the_project_table_was_read(tmp_path):
+    # Poetry 2.x declares main deps under [project] and dev deps under
+    # [tool.poetry.group.<name>.dependencies]. The old gap check returned None the
+    # moment [project].dependencies existed, so this whole shape was silent.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["flask==2.0.1"]\n\n'
+        '[tool.poetry.group.dev.dependencies]\npytest = "^8.0"\n',
+        encoding="utf-8",
+    )
+
+    gaps = _by_rule(_scan(tmp_path)[0], _UNSUPPORTED)
+
+    assert len(gaps) == 1
+    assert "Poetry" in gaps[0].title
+
+
+def test_both_poetry_declaration_forms_name_the_file_once(tmp_path):
+    # Two unread Poetry tables in one file is one fact about one file. Grouping is
+    # by (ecosystem, label), so a second label here would print the same path twice.
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry]\nname = "app"\n\n'
+        '[tool.poetry.dependencies]\nflask = "^2.0"\n\n'
+        '[tool.poetry.group.dev.dependencies]\npytest = "^8.0"\n',
+        encoding="utf-8",
+    )
+
+    gaps = _by_rule(_scan(tmp_path)[0], _UNSUPPORTED)
+
+    assert len(gaps) == 1
+    assert gaps[0].evidence.count("pyproject.toml") == 1
+
+
+def test_an_empty_group_table_is_not_reported_as_a_gap(tmp_path):
+    # The guard against the fix becoming noise. A declared-but-empty table hides
+    # nothing, and a finding about it is a finding a reader learns to skip.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["flask==2.0.1"]\n\n'
+        "[dependency-groups]\n\n"
+        "[tool.poetry.group.dev]\n",
+        encoding="utf-8",
+    )
+
+    assert _by_rule(_scan(tmp_path)[0], _UNSUPPORTED) == []
+
+
+def test_a_wrong_shaped_tool_table_does_not_take_the_whole_sca_pass_down(tmp_path):
+    # The gap check runs outside the per-manifest parse guard, so an AttributeError
+    # here would escape to scan()'s backstop and lose every other manifest with it
+    # -- the failure D69 closed. tomllib accepts all of this; only our reading of
+    # it assumes tables.
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["flask==2.0.1"]\n\n'
+        '[tool]\npoetry = "not-a-table"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "composer.json") .write_text("{}", encoding="utf-8")
+
+    findings, ctx = _scan(tmp_path)
+
+    # The other manifest survived, which is the thing being protected.
+    assert len(_by_rule(findings, _UNSUPPORTED)) == 1
+    assert "Composer" in _by_rule(findings, _UNSUPPORTED)[0].title
+    assert ctx.errors == []
+
+
+def test_the_export_example_names_the_readers_own_tool(tmp_path):
+    # The remediation named `poetry export` for every label it fired on, Pipenv's
+    # included. A command for the wrong tool on the line whose job is to be acted
+    # on is worse than no command, so a label without a verified one gets none.
+    (tmp_path / "Pipfile").write_text('[packages]\nflask = "*"\n', encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "poetry.lock").write_text("# lock\n", encoding="utf-8")
+
+    by_label = {
+        f.title.split(" dependencies")[0]: f
+        for f in _by_rule(_scan(tmp_path)[0], _UNSUPPORTED)
+    }
+
+    assert set(by_label) == {"Pipenv", "Poetry"}
+    assert "pipenv requirements" in by_label["Pipenv"].remediation
+    assert "poetry" not in by_label["Pipenv"].remediation
+    assert "poetry export" in by_label["Poetry"].remediation
+
+
 # --- nothing supported at all ----------------------------------------------
 
 def test_no_supported_manifest_says_sca_did_not_run(tmp_path):

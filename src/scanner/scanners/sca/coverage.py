@@ -72,6 +72,17 @@ _UNRESOLVED_REASON: dict[str, str] = {
 #: The order the phrases appear in, worst coverage loss first.
 _UNRESOLVED_ORDER = tuple(_UNRESOLVED_REASON)
 
+#: A command that turns one unread declaration format into a format this scan reads,
+#: keyed by the gap's label so the advice names the tool the reader is actually using.
+#: This sentence used to name ``poetry export`` for every label, including Pipenv's —
+#: a plausible command for the wrong tool, on the one line in the finding whose whole
+#: job is to be acted on. A label with no entry gets the sentence without an example,
+#: which is why the lookup may miss: an unverified command is worse than none.
+_EXPORT_HINT: dict[str, str] = {
+    "Poetry": "poetry export -f requirements.txt",
+    "Pipenv": "pipenv requirements",
+}
+
 
 def _rel(path: str, root: str) -> str:
     """``path`` relative to the scan root, for evidence a human can scan.
@@ -128,11 +139,12 @@ def unsupported_manifest_findings(
                 f"[project.dependencies] table. The {label} declarations in these files "
                 f"were not read, so those dependencies were not examined."
             )
+            hint = _EXPORT_HINT.get(label)
+            example = f" — for example `{hint}` — " if hint else " "
             remediation = (
                 f"Absence of findings for these files is not evidence that their "
                 f"dependencies are free of known vulnerabilities. Export the resolved "
-                f"versions to a format this scan reads — for example "
-                f"`poetry export -f requirements.txt` — and scan again."
+                f"versions to a format this scan reads{example}and scan again."
             )
         else:
             evidence = (

@@ -394,32 +394,63 @@ def parse_manifest(
     return []
 
 
-def pyproject_coverage_gap(path: str, text: str) -> CoverageGap | None:
-    """A Poetry project whose dependencies :func:`parse_pyproject` cannot see.
+def _table(value: object) -> dict:
+    """``value`` when it is a TOML table, else an empty one.
+
+    :func:`pyproject_coverage_gaps` runs outside the caller's parse guard, so a
+    file whose ``[tool]`` key holds a string must not raise ``AttributeError``
+    here. That would take the whole SCA pass down on its way to describing one
+    manifest, which is the failure D69 closed.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def pyproject_coverage_gaps(path: str, text: str) -> list[CoverageGap]:
+    """Dependency declarations in ``pyproject.toml`` that nothing here reads.
 
     This is the worst shape the coverage problem takes. ``pyproject.toml`` is a
     *supported* manifest, so it is discovered, opened and parsed without
-    complaint — but the parser reads PEP 621 tables, and Poetry declares under
-    ``[tool.poetry.dependencies]``. The file yields zero dependencies, the scan
-    reports nothing, and nothing anywhere says the project's entire dependency
-    set went unread. An unrecognized file at least leaves no false impression.
+    complaint — but :func:`parse_pyproject` reads the PEP 621 ``[project]``
+    tables and nothing else. Three other declaration sites live in the same file:
 
-    Returns ``None`` when a PEP 621 table is also present: those dependencies
-    *were* read, so there is no gap to report even if Poetry metadata sits
-    alongside them.
+    * ``[tool.poetry.dependencies]``, Poetry's pre-PEP-621 form.
+    * ``[tool.poetry.group.<name>.dependencies]``, Poetry's dev and test groups,
+      which have no PEP 621 equivalent and are therefore unread even in a project
+      whose main dependencies *were* read out of ``[project]``.
+    * ``[dependency-groups]``, PEP 735 — the same PEP 508 strings as
+      ``[project.dependencies]``, in a top-level table a parser looking under
+      ``[project]`` never reaches.
+
+    The first is reported only when no PEP 621 table is present, because Poetry
+    treats ``[project].dependencies`` as authoritative when both exist. The other
+    two are reported whenever they hold anything, precisely because they coexist
+    with dependencies that were read: a partially scanned manifest presented as a
+    fully scanned one is the same lie as an unscanned one, told more convincingly.
+
+    At most one gap per label, so a project using both Poetry forms produces one
+    finding naming the file once rather than two naming it twice.
     """
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         # The parser is about to raise on the same text and that error is
         # reported on its own; do not pre-empt it with a misleading gap.
-        return None
-    if not ((data.get("tool") or {}).get("poetry") or {}).get("dependencies"):
-        return None
-    project = data.get("project") or {}
-    if project.get("dependencies") or project.get("optional-dependencies"):
-        return None
-    return CoverageGap("PyPI", "Poetry", path, ecosystem_checked=True)
+        return []
+    project = _table(data.get("project"))
+    read_pep621 = bool(
+        project.get("dependencies") or project.get("optional-dependencies")
+    )
+    poetry = _table(_table(data.get("tool")).get("poetry"))
+
+    labels: list[str] = []
+    if (poetry.get("dependencies") and not read_pep621) or any(
+        _table(group).get("dependencies")
+        for group in _table(poetry.get("group")).values()
+    ):
+        labels.append("Poetry")
+    if data.get("dependency-groups"):
+        labels.append("PEP 735")
+    return [CoverageGap("PyPI", lab, path, ecosystem_checked=True) for lab in labels]
 
 
 def _is_manifest(filename: str) -> bool:
