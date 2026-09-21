@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 632 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 642 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2422,6 +2422,78 @@ extension but the default treatment of the single most common injectable surface
 the web. The five sibling narrowings had each been given a voice one at a time; this
 one was missed because it narrows in a different module from the one that reports.
 Suite 618 to 632.
+
+---
+
+### D76 — The crawl's depth bound cut coverage on nearly every site and said nothing
+
+**Two bounds, one sentence between them.** `_walk` stops for two reasons.
+`max_pages` is checked in the loop condition and, when it binds with a non-empty
+queue, files a `truncated` problem naming how many discovered links went unread —
+`docs/configuration.md` had promised that in writing. `max_depth` binds in an `if
+depth < max_depth:` whose false branch did not exist: a page at the limit had its
+links left unextracted and uncounted, so the walk ended with an empty `problems`
+list and an empty `incomplete()`. That is the same pair of values a walk that ran
+out of site returns.
+
+**Measured on a three-level site.** Entry linking `/a`, `/a` linking `/b`, `/b`
+linking `/c?id=1`, `/d?id=2` and `/e`. With the default `max_depth = 2` the crawl
+read three pages, reported no problems, and handed the active tier two injection
+points instead of four — the two parameterised URLs behind `/b` never existed as
+far as the scan was concerned. `max_pages = 50` was nowhere near binding, so the
+one disclosure that did exist had nothing to say.
+
+**This is the widest quiet narrowing the tool had.** `max_depth` defaults to 2 and
+almost every real site is deeper than two levels, so this fired on essentially every
+DAST run ever made with this scanner, including its own rehearsal target's shape.
+D42's rule is about rare cases — an unrecognized manifest, a file too large to read.
+This one was the default path.
+
+**The existing test had drawn the right distinction and stopped one step short.**
+`test_reaching_max_depth_is_not_truncation` argues, correctly, that "max_depth is a
+shape, max_pages is a ceiling" and that a depth-bounded walk which drained its queue
+"must not claim otherwise — otherwise the default settings would report an incomplete
+scan of every site." Every word of that holds and the test still passes unchanged.
+What it does not establish is the step that was taken from it: *not truncation* was
+read as *nothing to report*, and those are different claims.
+
+**So the kind stays out of `INCOMPLETE_KINDS` and the report gets a skip.**
+`depth-capped` is deliberately not in that set, because that set is what decides exit
+3, and a default which binds on most sites would put every scan there — the argument
+this module already makes about 4xx: an exit code that fires on everything carries no
+information. A `logger.info` was the other option and is not a disclosure; nothing
+in the log reaches the artifact a client reads. The skip channel is exactly the
+sentence's shape and already had five entries when D75 added the sixth: nothing broke
+and nobody refused us, a default the operator most likely never read said do not go
+further. `check="depth"`, non-empty, for the reason D71 and D75 both record.
+
+**The count is the gap and not the bookkeeping.** Links at the limit are collected
+as normalized URLs and resolved against `visited` *and* the queue only after the walk
+ends: site navigation means every page links home, so a page already read by a
+shorter path is not a gap, and a link that is both one level too deep here and still
+queued when `max_pages` stopped us belongs to one sentence rather than two.
+Out-of-scope links are not counted — they were never ours to read and `out-of-scope`
+is the record for those. Malformed hrefs at the limit are dropped rather than filed
+as `bad-link`, because that kind *is* in `INCOMPLETE_KINDS` and would exit 3 over an
+href the depth bound had already placed out of reach.
+
+**Fifteen mutations, ten new tests.** Never recording the gap; reporting one when
+nothing was cut off; counting links a shorter path had already read; double-counting
+links the truncation sentence already claims; counting out-of-scope links; collecting
+nothing at the limit; filing it as `truncated`; adding it to `INCOMPLETE_KINDS`;
+routing it to the log instead of the report; emitting a failure instead of a skip;
+emptying `check=`; dropping the not-evidence sentence; stopping a level early;
+following links past the bound; and filing bad hrefs at the limit. All fifteen fail.
+Phase G of the rehearsal proves it over a real socket, where the server's own log is
+the witness the unit tests cannot be — every one of those fakes an HTTP client, so
+"it did not fetch them" is otherwise a claim about a mock. Rehearsal 56 assertions to
+59.
+
+**Why:** The two bounds on this walk are siblings and only one of them had ever been
+asked to account for itself. The reason the quiet one stayed quiet is instructive:
+a correct argument had been made in its defence — depth is a shape, not a failure —
+and that argument settled the question of the *exit code* while being mistaken for
+settling the question of whether to say anything at all. Suite 632 to 642.
 
 ---
 

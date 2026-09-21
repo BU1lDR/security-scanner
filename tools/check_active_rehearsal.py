@@ -60,13 +60,15 @@ looped over a list of findings and ran zero assertions when the list was empty -
 a PASS whose meaning was "there was no finding to check". That is the one shape
 this file exists to refuse, so counts are asserted before loops throughout.
 
-**Six phases.** Authorized; authorization withheld; a four-request budget; a
-socket bound but never listened on (which must exit 3, not 0); and two in-process
-phases for the two config keys argv cannot reach -- ``dast.active.enabled``, and
+**Seven phases.** Authorized; authorization withheld; a four-request budget; a
+socket bound but never listened on (which must exit 3, not 0); and three
+in-process phases for the config keys argv cannot reach -- ``dast.active.enabled``;
 the ``include_post`` *default*, which the TOML files here all override and which
-is therefore the one path the CLI phases could not measure (D75). The in-process
-phases run their *positive* control first, because D43's first harness reported
-PASS on eight gate cases while the scanner registry was empty.
+was therefore the one path the CLI phases could not measure (D75); and
+``dast.crawler.max_depth`` actually binding, which this target's flat shape means
+the default never does (D76). The in-process phases run their *positive* control
+first, because D43's first harness reported PASS on eight gate cases while the
+scanner registry was empty.
 
 **Two listeners.** ``127.0.0.1`` is the target. ``127.0.0.2`` is in
 ``scope.allowed_hosts`` and *not* in the active allowlist, so the crawl reads it
@@ -1418,6 +1420,89 @@ def phase_f(checks: Checks, port: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# phase G -- in-process, the depth bound actually binding
+# --------------------------------------------------------------------------- #
+
+def phase_g(checks: Checks, port: int) -> None:
+    """``max_depth`` cuts coverage on nearly every real site and said nothing about
+    it until D76. Phases A-D never made it bind: this target's index links
+    thirteen routes and every one of them is a leaf, so the default of 2 drains
+    the queue with room to spare.
+
+    ``max_depth = 0`` is the smallest configuration that makes the bound bite on a
+    site of this shape. It is degenerate as a way to scan, and that is not what is
+    being measured -- the assertions are about the disclosure and about the walk
+    actually stopping, and a degenerate bound is the cleanest way to put both in
+    one run. The wire is the witness the unit tests cannot be: every one of those
+    fakes an HTTP client, so "it did not fetch them" is a claim about a mock.
+    ``dast.crawler.max_depth`` has no CLI flag either, so this is in-process."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from scanner.core.config import Config
+    from scanner.core.egress import Egress
+    from scanner.core.engine import Engine
+    from scanner.core.gate import RequestGate
+    from scanner.core.http import AsyncHttpClient
+    from scanner.core.scope import Scope
+    from scanner.core.target import Target
+
+    WIRE.clear()
+    config = Config.from_dict({
+        "dast": {
+            "enabled": False,
+            "crawler": {"max_depth": 0},
+            "active": {"enabled": True, "max_requests": 200},
+        },
+        "http": {"per_host_rps": 25.0, "timeout_s": 10.0},
+    })
+    scope = Scope(
+        allowed_hosts={"127.0.0.1"},
+        active_allowlist={"127.0.0.1"},
+        authorized_ack=True,
+    )
+    target = Target(url=f"http://127.0.0.1:{port}/", scope=scope)
+
+    async def go():
+        gate = RequestGate(scope=scope, egress=Egress())
+        async with AsyncHttpClient(gate, per_host_rps=25.0, timeout_s=10.0) as http:
+            return await Engine().run(
+                target, active_enabled=True, http=http, config=config,
+            )
+
+    report = asyncio.run(go())
+    wire = WIRE.snapshot()
+    paths = {r["path"].split("?")[0] for r in wire}
+    skips = [s for s in report.skipped if s.check == "depth"]
+    print(f"  [{len(wire)} reqs, paths {sorted(paths)}, "
+          f"{len(skips)} depth skip(s)]")
+
+    # G1: the disclosure, with a number in it. A30/F1's pattern: the count is the
+    # part an operator sizes a config change against.
+    reason = skips[0].reason if skips else ""
+    checks.expect(
+        len(skips) == 1 and "max_depth=0" in reason and "link(s)" in reason,
+        "the depth bound discloses what it left unread",
+        f"skipped={[(s.check, s.reason) for s in report.skipped]!r}",
+    )
+    # G2: and it really did stop. G1 read the report; this reads the server's own
+    # log, so a crawl that emitted the skip and walked on anyway fails here.
+    checks.expect(
+        paths == {"/"},
+        "and read only the entry page",
+        f"paths fetched: {sorted(paths)!r}",
+    )
+    # G3: a skip, not an error. max_depth is the shape of the walk the operator
+    # asked for, and exit 3 on a default that binds on nearly every site is an
+    # exit code that has stopped carrying information -- the argument crawler.py
+    # already makes about 4xx. The tier stays in the ran list for D71's reason.
+    checks.expect(
+        not report.errors and "dast-active" in report.scanners_run,
+        "as a skip, with no error and the tier still counted as having run",
+        f"errors={[(e.scanner, e.check) for e in report.errors]!r}, "
+        f"scanners_run={report.scanners_run!r}",
+    )
+
+
+# --------------------------------------------------------------------------- #
 
 def main() -> int:
     # ASCII only. A Windows console defaults to cp1252, where a box-drawing
@@ -1472,6 +1557,8 @@ def main() -> int:
             phase_e(checks, port1)
             print("\n  -- F: in-process, the include_post default --")
             phase_f(checks, port1)
+            print("\n  -- G: in-process, the depth bound binding --")
+            phase_g(checks, port1)
     finally:
         for srv in (srv1, srv2):
             srv.shutdown()

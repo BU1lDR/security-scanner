@@ -279,12 +279,30 @@ class DastActiveScanner(Scanner):
 
         A 4xx is logged and no more. Dead links are ordinary on real sites, and an
         exit code that fires on all of them carries no information.
+
+        ``depth-capped`` is the third case and sits between the two. It is a genuine
+        coverage gap — links were found and not followed, so the injection points
+        behind them never existed — but it is one the operator configured, by default,
+        and ``max_depth`` defaults to 2 while most sites are deeper. As an error it
+        would exit 3 on nearly every scan, which is why the crawler keeps it out of
+        ``INCOMPLETE_KINDS``; as a log line it would not reach the report at all. A
+        skip is the channel that already exists for "we deliberately did not look":
+        five other narrowings in this tier use it, and this is the sixth (D75, D76).
         """
         for problem in result.problems:
             if problem.kind in INCOMPLETE_KINDS:
                 ctx.emit_failure(
                     "dast-active", "crawl",
                     f"{problem.kind}: {problem.url} — {problem.detail}",
+                )
+            elif problem.kind == "depth-capped":
+                ctx.emit_skip(
+                    "dast-active",
+                    f"the crawl {problem.detail}, so no injection point behind them "
+                    f"was tested. Absence of findings for those pages is not "
+                    f"evidence that they are safe; raise dast.crawler.max_depth to "
+                    f"reach them",
+                    check="depth",
                 )
             else:
                 ctx.logger.info(

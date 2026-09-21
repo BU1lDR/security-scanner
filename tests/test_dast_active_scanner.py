@@ -624,3 +624,57 @@ def test_the_input_count_is_distinct_inputs_not_summed_form_fields():
     assert len(declined) == 1, ctx.skipped
     assert "2 form(s)" in declined[0].reason, declined[0].reason
     assert "3 input(s)" in declined[0].reason, declined[0].reason
+
+
+# ── the depth bound, disclosed without failing the run (D76) ───────────────────
+
+
+class _DeepSiteHttp(_SiteHttp):
+    """Three levels, the third carrying two parameterised links. The default
+    max_depth of 2 reads the first three pages and stops, so /c and /d never become
+    injection points -- the ordinary shape of a site, and the ordinary result."""
+
+    _P = {
+        "/": '<a href="/a">a</a>',
+        "/a": '<a href="/b">b</a>',
+        "/b": '<a href="/c?id=1">c</a><a href="/d?id=2">d</a>',
+    }
+
+    async def get(self, url, *, active=False, params=None, **kwargs):
+        self.gets.append({"url": url, "active": active})
+        path, _ = self._merged(url, params)
+        return _Resp(self._P.get(path, "leaf"))
+
+
+def test_a_crawl_stopped_by_max_depth_says_so_in_the_report():
+    """The crawler records it; this is the half that reaches a person. Without this
+    the record sits in ``result.problems``, is not in INCOMPLETE_KINDS, falls to the
+    ``logger.info`` branch and never leaves the log (D76)."""
+    ctx = _ctx(_DeepSiteHttp())
+    _collect(ctx)
+    depth = [s for s in ctx.skipped if s.check == "depth"]
+    assert len(depth) == 1, ctx.skipped
+    assert "max_depth=2" in depth[0].reason
+    assert "2 link(s)" in depth[0].reason
+    assert "not evidence" in depth[0].reason       # the D42 sentence
+    assert "dast.crawler.max_depth" in depth[0].reason   # and what to do about it
+
+
+def test_the_depth_skip_does_not_move_the_exit_code():
+    """max_depth is the shape of the walk the operator asked for, so this is a skip
+    and not an error: exit 3 on a default that binds on nearly every site is an exit
+    code that has stopped meaning anything. The tier also stays in the ran list, for
+    the reason D71 and D75 both document -- it did crawl, and it did probe what it
+    reached."""
+    ctx = _ctx(_DeepSiteHttp())
+    _collect(ctx)
+    assert ctx.errors == [], ctx.errors
+    assert all(s.check for s in ctx.skipped if s.scanner == "dast-active"), ctx.skipped
+
+
+def test_a_site_inside_the_depth_bound_reports_no_depth_gap():
+    """The other direction. ``_SiteHttp`` is two pages deep and self-contained, so a
+    skip here would be a gap reported on a scan that had none."""
+    ctx = _ctx(_SiteHttp())
+    _collect(ctx)
+    assert not [s for s in ctx.skipped if s.check == "depth"], ctx.skipped

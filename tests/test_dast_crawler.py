@@ -297,6 +297,120 @@ def test_reaching_max_depth_is_not_truncation():
     assert "truncated" not in _kinds(result)
 
 
+# ── the other bound, which said nothing at all (D76) ──────────────────────────
+
+
+def test_reaching_max_depth_says_how_much_it_left_behind():
+    """"Not truncation" was read as "nothing to report", and those are different
+    claims. The walk above ends with an empty problems list and an empty
+    ``incomplete()``, which is what a walk that ran out of site returns — so a crawl
+    that stopped one level short of two parameterised pages was indistinguishable
+    from a crawl that had read the whole thing. ``max_depth`` defaults to 2 and most
+    sites are deeper, so this was the widest quiet narrowing in the tool (D76)."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp(
+            '<a href="/c?id=1">c</a><a href="/d?id=2">d</a><a href="/e">e</a>'
+        ),
+    }
+    result, http = _crawl("https://example.com/", pages, max_depth=1)
+    capped = [p for p in result.problems if p.kind == "depth-capped"]
+    assert len(capped) == 1, result.problems
+    assert "max_depth=1" in capped[0].detail
+    assert "3 link(s)" in capped[0].detail
+    # It reported them instead of fetching them: the bound still binds.
+    assert not any(u.endswith(("/c?id=1", "/d?id=2", "/e")) for u in http.gets)
+
+
+def test_the_depth_bound_is_disclosed_without_failing_the_run():
+    """The distinction the test above this section draws, kept. ``max_depth`` is the
+    shape of the walk the operator asked for, so a depth-bounded walk is not a broken
+    one: ``depth-capped`` stays out of ``INCOMPLETE_KINDS``, which is what decides
+    exit 3. Putting it in would exit 3 on nearly every real site, and an exit code
+    that fires on everything carries no information — the same argument this module
+    already makes about 4xx."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp('<a href="/deep">deep</a>'),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=1)
+    assert "depth-capped" in _kinds(result)
+    assert "truncated" not in _kinds(result)
+    assert result.incomplete() == []
+
+
+def test_a_walk_that_drained_its_queue_reports_no_depth_gap():
+    """The other direction, and the one that matters most here: a disclosure that
+    fires whenever ``max_depth`` exists rather than when it actually cut something off
+    is a line on every report, which is how a report section stops being read."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a>'),
+        "https://example.com/a": _Resp("leaf, no links at all"),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=1)
+    assert result.problems == []
+    assert "depth-capped" not in _kinds(result)
+
+
+def test_a_link_at_the_limit_that_was_read_by_a_shorter_path_is_not_counted():
+    """The count's only job is to size the gap, so a page reached at depth 1 must not
+    also be reported as unreachable because something at depth 2 links to it. Site
+    navigation makes this the common case, not the corner one: every page links home."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a><a href="/b">b</a>'),
+        "https://example.com/a": _Resp("leaf"),
+        "https://example.com/b": _Resp(
+            '<a href="/">home</a><a href="/a">a</a><a href="/new">new</a>'
+        ),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=1)
+    capped = [p for p in result.problems if p.kind == "depth-capped"]
+    assert "1 link(s)" in capped[0].detail, capped[0].detail
+
+
+def test_an_out_of_scope_link_at_the_limit_is_not_counted_as_a_gap():
+    """It was never ours to read. Counting it would inflate the gap with pages the
+    scope deliberately excludes, and ``out-of-scope`` is the record for those."""
+    pages = {
+        "https://example.com/": _Resp(
+            '<a href="https://elsewhere.test/x">off</a><a href="/mine">mine</a>'
+        ),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=0)
+    capped = [p for p in result.problems if p.kind == "depth-capped"]
+    assert len(capped) == 1, result.problems
+    assert "1 link(s)" in capped[0].detail, capped[0].detail
+
+
+def test_a_link_still_queued_when_max_pages_stopped_us_is_counted_once():
+    """Both bounds can bind in one walk. The two sentences must not both claim the
+    same URL, or the report adds its own numbers up wrong."""
+    pages = {
+        "https://example.com/": _Resp('<a href="/a">a</a><a href="/b">b</a>'),
+        "https://example.com/a": _Resp('<a href="/b">b</a><a href="/deep">deep</a>'),
+        "https://example.com/b": _Resp("leaf"),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=1, max_pages=2)
+    truncated = [p for p in result.problems if p.kind == "truncated"]
+    capped = [p for p in result.problems if p.kind == "depth-capped"]
+    # /b was queued from the entry page and never reached: that is truncation.
+    assert "1 discovered links" in truncated[0].detail, truncated[0].detail
+    # /deep is a level too deep; /b is not counted a second time.
+    assert "1 link(s)" in capped[0].detail, capped[0].detail
+
+
+def test_an_unreadable_href_at_the_limit_does_not_fail_the_run():
+    """A `bad-link` is in INCOMPLETE_KINDS, so reporting one here would exit 3 over a
+    link the depth bound had already placed out of reach. The bound's own sentence
+    covers the page; there is no URL to add to its count."""
+    pages = {
+        "https://example.com/": _Resp('<a href="http://[oops">bad</a><a href="/ok">ok</a>'),
+    }
+    result, _ = _crawl("https://example.com/", pages, max_depth=0)
+    assert "bad-link" not in _kinds(result)
+    assert result.incomplete() == []
+
+
 def test_one_malformed_href_does_not_discard_the_pages_already_collected():
     """`urljoin` raises ValueError on `href="http://["`, and that call was unguarded
     inside the walk: the exception left `crawl`, the caller caught it, and every page

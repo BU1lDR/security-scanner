@@ -228,6 +228,11 @@ async def _walk(
     visited: set[str] = set()
     queue: deque[tuple[str, int, int]] = deque([(entry_url, 0, 0)])
     fetched = 0
+    #: In-scope links found on pages at ``max_depth``, which are therefore never
+    #: queued. Resolved against ``visited`` and the queue *after* the walk, for the
+    #: reason the truncation count is: the same URL is often linked from two places,
+    #: and one of them may be shallow enough to have been read.
+    deferred: set[str] = set()
 
     while queue and fetched < max_pages:
         url, depth, hops = queue.popleft()
@@ -302,8 +307,8 @@ async def _walk(
             CrawlProblem(url, "bad-link", f"form action {action!r}: {why}")
             for action, why in bad_actions
         )
+        links, bad_hrefs = _extract_links(soup, url)
         if depth < max_depth:
-            links, bad_hrefs = _extract_links(soup, url)
             result.problems.extend(
                 CrawlProblem(url, "bad-link", f"href {href!r}: {why}")
                 for href, why in bad_hrefs
@@ -318,6 +323,24 @@ async def _walk(
                     continue
                 if queueable:
                     queue.append((link, depth + 1, 0))
+        else:
+            # The depth bound's half of what max_pages already said. Not queueing
+            # these is correct and unchanged; not *counting* them meant a walk that
+            # stopped one level short of the whole site ended with an empty problems
+            # list, which is the same result as a walk that ran out of site (D76).
+            #
+            # ``bad_hrefs`` is deliberately dropped here rather than reported. That
+            # kind is in INCOMPLETE_KINDS, so filing one would exit 3 over an href
+            # that was out of reach either way, and the depth bound's own sentence
+            # already covers this page. The guard below is the same defence in depth
+            # as the branch above: a link ``_extract_links`` resolved should not fail
+            # here, and if it does there is no URL to add to the count.
+            for link in links:
+                try:
+                    if scope.allows(link):
+                        deferred.add(_normalize(link))
+                except ValueError:
+                    continue
 
     if queue:
         # The bound did its job; saying so is the other half of it. docs/
@@ -333,6 +356,26 @@ async def _walk(
             entry_url, "truncated",
             f"stopped after {fetched} pages at max_pages={max_pages}; "
             f"{len(unread)} discovered links were not read",
+        ))
+
+    # And the same for the other bound. ``depth-capped`` is deliberately *not* in
+    # INCOMPLETE_KINDS: max_depth is the shape of the walk the operator asked for, so
+    # a depth-bounded walk that drained its queue is not a failed one, and putting it
+    # there would exit 3 on every site deeper than two levels — which is most of
+    # them, and an exit code that fires on everything says nothing. What it is not is
+    # silent. The caller turns this into a skip, which reaches the report without
+    # touching the exit code, because nothing was refused and nothing broke: a
+    # default the operator most likely never read said do not go further (D76).
+    #
+    # Subtracts the queue as well as ``visited`` so a link that is both one level too
+    # deep here and still unread when max_pages stopped us is counted by one sentence
+    # rather than by two.
+    unreached = deferred - visited - {_normalize(url) for url, _, _ in queue}
+    if unreached:
+        result.problems.append(CrawlProblem(
+            entry_url, "depth-capped",
+            f"stopped at max_depth={max_depth}; {len(unreached)} link(s) found on "
+            f"the deepest pages read were one level too deep to follow",
         ))
 
 
