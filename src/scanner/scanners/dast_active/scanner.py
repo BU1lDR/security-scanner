@@ -24,7 +24,9 @@ Fault-isolated is not the same as silent, and this scanner is where the differen
 matters most. What it could not read, it records: pages the crawl failed to fetch
 become ``ScanError``s so the run exits 3 rather than 0, and hosts the request gate
 refused become ``ScanSkip``s so "we were not allowed to test that" is told apart
-from "we tested it and it was fine" (D58, D59).
+from "we tested it and it was fine" (D58, D59). A check that ran and still could
+not decide — the target was already emitting the signal the check reads — is a
+third kind of non-answer and gets its own skip (D71).
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from scanner.core.gate import OutOfScopeError
 from scanner.core.registry import register
 from scanner.core.scanner import Requires, Scanner
 from scanner.scanners.dast.crawler import INCOMPLETE_KINDS, CrawlResult, crawl
-from scanner.scanners.dast_active.checks import ALL_CHECKS
+from scanner.scanners.dast_active.checks import ALL_CHECKS, Inconclusive
 from scanner.scanners.dast_active.injection import injection_points
 
 
@@ -55,15 +57,24 @@ class _BudgetReached(Exception):
 class _Incomplete:
     """What the active tier got no verdict on, kept separated by why.
 
-    A refusal and a budget cut-off are both "this parameter was never actually
-    tested", and both would otherwise land in the report as an absence of findings.
-    They are counted apart because the two sentences are not interchangeable: one
-    says a host was kept out of the active allowlist, the other says the scan ran
-    out of the traffic it was allowed to send.
+    A refusal, a budget cut-off and an inapplicable test are all "this parameter was
+    never actually tested", and all of them would otherwise land in the report as an
+    absence of findings. They are counted apart because the three sentences are not
+    interchangeable: one says a host was kept out of the active allowlist, the second
+    says the scan ran out of the traffic it was allowed to send, and the third says
+    the target's own behaviour left the check with nothing to measure.
+
+    The third one was missing for as long as this docstring made the argument for it
+    (D71). ``check_sqli_error`` returned an empty list when the page already emitted
+    a database error, which is the one thing that class of parameter must not do.
     """
 
     refused: dict[str, int] = field(default_factory=dict)
     cut_off: int = 0
+    # Keyed by the reason sentence, not by parameter: a site that prints its SQL
+    # errors on every page would otherwise put one skip per injection point into
+    # the report, and the reason is the part the operator acts on.
+    inconclusive: dict[str, int] = field(default_factory=dict)
 
 
 class _CountingHttp:
@@ -174,10 +185,17 @@ class DastActiveScanner(Scanner):
                 f"refused them, so that host was crawled but never tested",
                 check="gate",
             )
+        for reason, count in sorted(incomplete.inconclusive.items()):
+            ctx.emit_skip(
+                "dast-active",
+                f"{count} (injection point, check) combinations reached no verdict: "
+                f"{reason}",
+                check="inconclusive",
+            )
 
     @staticmethod
     async def _guarded(coro, point, incomplete: _Incomplete):
-        """Await one check, telling the two deliberate non-answers apart from a crash.
+        """Await one check, telling the deliberate non-answers apart from a crash.
 
         A gate refusal is not a crash and must not be recorded as one: it means this
         host is in scope to look at but not in ``scope.active_allowlist``, which is a
@@ -190,7 +208,15 @@ class DastActiveScanner(Scanner):
 
         A budget cut-off is the same shape for the same reason: this parameter was not
         tested, and the bound that stopped it is one the operator set and can raise.
-        Both are counted, neither is an error, and every other exception propagates to
+
+        :class:`~scanner.scanners.dast_active.checks.Inconclusive` is the third, and it
+        is the only one raised by a check rather than by the plumbing underneath it: the
+        check sent its requests, got answers, and the answers did not let it decide. A
+        skip and not a failure — nothing broke and nobody refused us, so exit 3 would
+        be claiming an error that did not happen; but not an empty list either, because
+        that is the sentence reserved for a parameter we tested and cleared.
+
+        All three are counted, none is an error, and every other exception propagates to
         ``run_check``, which is what turns a genuine failure into exit 3.
         """
         try:
@@ -201,6 +227,10 @@ class DastActiveScanner(Scanner):
             return []
         except _BudgetReached:
             incomplete.cut_off += 1
+            return []
+        except Inconclusive as exc:
+            reason = str(exc) or "the check could not reach a verdict"
+            incomplete.inconclusive[reason] = incomplete.inconclusive.get(reason, 0) + 1
             return []
 
     async def _safe_crawl(self, ctx) -> CrawlResult:

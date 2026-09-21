@@ -16,6 +16,9 @@ exploit one (decisions.md D8):
 - **error-based SQLi** — a single quote appended to the value. A finding is raised
   only if it produces a database error string that a *baseline* (untampered)
   request did not — no boolean/time-based probing, no ``OR 1=1``, no data access.
+  When the baseline *already* carries a database error the check raises
+  :class:`Inconclusive` rather than returning nothing, because there is no longer
+  any difference it could attribute to the probe (D71).
 - **open redirect** — a benign external sentinel URL placed in URL-shaped
   parameters; a finding is raised only if the server 3xx-redirects to that host.
 
@@ -31,6 +34,25 @@ from scanner.core.finding import FRAGMENT_MAX_LEN, Confidence, Finding, Severity
 from scanner.core.location import Location
 
 _WSTG = "https://owasp.org/www-project-web-security-testing-guide/"
+
+
+class Inconclusive(Exception):
+    """A check ran to completion and reached no verdict about the parameter.
+
+    Distinct from a failure, which is the machine refusing us, and from an empty
+    finding list, which is a *negative* verdict — this parameter was tested and is
+    clean. The third case is a check whose one signal the target was already
+    emitting before the probe: the test is inapplicable here, through no fault of
+    ours and no error of the target's.
+
+    It is an exception rather than a third return value because the checks are
+    called through one signature (``point, http``) that has no ``ctx`` to emit on
+    and no room for an out-of-band reason. ``_guarded`` in the scanner already
+    exists to tell deliberate non-answers apart from crashes, and this is a third
+    one for it to tally (D71). The message is the sentence the report will show, so
+    it must read as prose and must not quote the response back — see the redaction
+    note above ``_SQL_ERRORS``.
+    """
 
 # --- reflected XSS -----------------------------------------------------------
 # A unique marker that cannot occur naturally; the angle-bracket form is what we
@@ -233,8 +255,16 @@ async def check_xss_reflected(point, http) -> list[Finding]:
 
 async def check_sqli_error(point, http) -> list[Finding]:
     baseline = await _baseline(http, point)
-    if _sql_error_family(_body(baseline)):
-        return []  # page emits a DB error regardless of input; can't attribute it
+    family = _sql_error_family(_body(baseline))
+    if family:
+        # The page emits a database error before we touch it, so the one signal this
+        # check reads is already on and appending a quote cannot change it. That is
+        # not a negative result: it is no result. Returning [] here made an
+        # untestable parameter look like a tested one (D71).
+        raise Inconclusive(
+            f"the page already returns a {family} database error before any probe, "
+            f"so a new one could not be attributed to the injected value"
+        )
     resp = await _send(http, point, _original(point) + _SQLI_PROBE)
     family = _sql_error_family(_body(resp))
     if not family:

@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 582 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 587 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2077,6 +2077,80 @@ signals that would normally find it have already been spent. The check that
 mattered was not a sharper reading of the code but a comparison of two report
 outputs: a healthy target and a broken one, side by side, asking whether they
 differ.
+
+---
+
+### D71 — A parameter the SQLi check could not judge was reported as a clean one
+
+**The comment said "can't attribute it" and the report said the opposite.**
+`check_sqli_error` is comparative by construction: a database error appeared and the
+untampered request did not produce it. When the baseline *already* carries the error
+— a debug page, an app that echoes its last exception, a broken query behind an
+unrelated parameter — there is no difference left to attribute, and the check
+returned `[]`. That is the value it uses for a parameter it probed and cleared.
+Measured through the real terminal reporter against two in-process sites, one whose
+`/search` errors whatever you send it and one that is genuinely clean: byte-identical
+output, down to the `Summary:` line.
+
+**The plumbing for the fix was already there and already argued for it.**
+`_Incomplete` in the active scanner exists to keep the tier's non-answers apart by
+cause, and its docstring said why: a refusal and a budget cut-off "are both 'this
+parameter was never actually tested', and both would otherwise land in the report as
+an absence of findings." A third case fits that sentence exactly and was not in the
+dataclass. The checks take `(point, http)` and have no `ctx` to emit on, so the
+non-answer travels as an exception — `Inconclusive`, carrying the sentence the report
+will print — and `_guarded`, which already existed to tell deliberate non-answers
+apart from crashes, gains a third `except` and a third tally.
+
+**A skip, not a failure, and the asymmetry with D70 is deliberate.** An unreadable
+certificate is a failure because the machine refused us; this one is nobody's fault
+and nothing broke, so exit 3 would be asserting a fault that did not occur. The
+distinction the two share is the only one that matters: neither may come out as an
+empty finding list. `check="inconclusive"` is non-empty so the engine keeps
+`dast-active` in `scanners_run` — disclosing this as a whole-scanner skip would
+delete the tier from the "Ran:" line and take every check it *did* complete with it.
+
+**Tallied by reason rather than by parameter.** The pages that reach this branch
+print their SQL errors on every route, so one skip per injection point would put
+dozens of identical lines into the section of the report that exists to be read. The
+reason is the part an operator acts on, and the count carries the scale. For the same
+reason the sentence names the engine and not the response: this branch fires on
+exactly the pages that print their failing query, which is why `evidence` is
+redacted, and a reason string is written to disk and into an `--ai` request the same
+way `evidence` is.
+
+**Fourth time a green test was pinning the defect.** `test_no_sqli_when_error_string_`
+`is_present_in_baseline_too` asserted `== []` under a comment reading "our quote adds
+nothing" — true, and the conclusion drawn from it was wrong. After D57, D66 and D70
+the shape is familiar enough to state as a rule: a test written from the
+implementation asserts what the code does, and the only thing it can then catch is a
+change. It is renamed and inverted.
+
+**The live gate had the row and not the assertion.** `check_active_rehearsal.py`
+serves `/report-broken` for this exact case, and its own matched-pairs table said
+what to expect: "nothing (unattributable)". The gate held the scanner to the
+"nothing" and never checked the word in the parentheses — the set-equality assertion
+over findings is satisfied by silence, which is what silence is the problem with.
+A19c now asserts the skip, one layer in from A19b, which asserts the same thing for a
+host the request gate refused.
+
+**Thirteen mutations, thirteen red.** Eleven against the unit tests: the original
+`return []`, a reason that drops the engine name, a reason that echoes the response
+body, raising unconditionally so nothing is ever reported again, spending a probe on
+a result that cannot be read, catching without tallying, losing the reason at the
+scanner, tallying per parameter so the skips multiply, `check=""`, `emit_failure`
+instead of `emit_skip`, and not disclosing it at all. Two more against the rehearsal,
+over a real socket: the original defect and the engine-less reason. Suite 582 to 587;
+the rehearsal 50 assertions to 51.
+
+**Why:** This is the ninth entry fixing one silent non-answer, and the first where
+every piece needed to fix it was already written down. The dataclass argued the
+principle, the guard function existed for precisely this kind of exception, the live
+gate had built the route, and the branch itself said in a comment that it could not
+attribute the result. What was missing was the step from "we know this is
+unattributable" to "so the report has to say that" — which is the step a comment
+cannot take. A comment records what the author understood; only a channel makes the
+understanding reach the reader.
 
 ---
 

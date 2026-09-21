@@ -12,6 +12,7 @@ from scanner.core.http import AsyncHttpClient
 from scanner.core.rule_id import is_valid
 from scanner.core.scope import Scope
 from scanner.scanners.dast_active.checks import (
+    Inconclusive,
     check_open_redirect,
     check_sqli_error,
     check_xss_reflected,
@@ -109,9 +110,35 @@ def test_sqli_error_is_detected_when_a_quote_triggers_a_db_error():
     assert any(r["active"] for r in http.requests)
 
 
-def test_no_sqli_when_error_string_is_present_in_baseline_too():
-    # The page always shows the error text, so our quote adds nothing.
-    assert _run(check_sqli_error(_point(), _SqlHttp(always=True))) == []
+def test_a_page_that_always_errors_is_inconclusive_and_not_clean():
+    """The page shows the database error before we touch it, so our quote adds
+    nothing — and the old assertion here was ``== []``, which is the sentence this
+    check uses for a parameter it tested and cleared. Same output for "no SQL
+    injection" and "no way to tell", and the comment above it described the second
+    while the code produced the first (D71).
+
+    ``Inconclusive`` instead, carrying a reason the report can print. The engine name
+    is in it because that is what the operator triages on; the response body is not,
+    for the same reason it is kept out of ``evidence`` — the pages that reach this
+    branch are the ones printing their failing query."""
+    http = _SqlHttp(always=True)
+    with pytest.raises(Inconclusive) as caught:
+        _run(check_sqli_error(_point(), http))
+
+    reason = str(caught.value)
+    assert "MySQL" in reason, reason
+    assert "before any probe" in reason, reason
+    for leak in ("Warning:", "at line 1", "<html>"):
+        assert leak not in reason, f"reason echoed the response: {reason!r}"
+    # No point spending an active request on a probe whose result cannot be read.
+    assert [r["value"] for r in http.requests] == ["hi"]
+
+
+def test_a_page_with_no_database_error_at_all_reaches_a_real_verdict():
+    """The other direction, first: a check that raised ``Inconclusive`` on every
+    parameter would pass the test above and report nothing, ever."""
+    findings = _run(check_sqli_error(_point(), _EchoHttp(escape=True)))
+    assert findings == []
 
 
 class _BaselinelessSqlHttp:

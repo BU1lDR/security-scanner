@@ -27,7 +27,7 @@ route                planted                                must report
 ``/reflect-safe``    the same, HTML-escaped                 nothing
 ``/find``            reflects a *form's* GET parameter       ``xss-reflected``
 ``/report``          PostgreSQL error only when ``'`` present  ``sqli-error``
-``/report-broken``   MySQL error regardless of input        nothing (unattributable)
+``/report-broken``   MySQL error regardless of input        nothing; one skip (D71)
 ``/go``              honours ``next`` as a 302              ``open-redirect``
 ``/go-fixed``        302s to a fixed internal path          nothing (host guard)
 ``/go-200``          200 *plus* a ``Location`` header       nothing (status guard)
@@ -897,6 +897,20 @@ def phase_a(checks: Checks, url: str, config_path: Path,
     checks.expect(
         len(gate_skips) == 1 and "127.0.0.2" in (gate_skips[0].get("reason") or ""),
         "and the report discloses that it was refused, not cleared",
+        f"skipped={scan.get('skipped')!r}",
+    )
+    # A19c: /report-broken. A8 asserts no finding there, which is right and was the
+    # whole of it -- the row in this file's own table read "nothing
+    # (unattributable)", and the gate held the scanner to reporting nothing while
+    # the word in the parentheses went unasserted. It is the same conflation A19b
+    # exists for, one layer further in: not a host we were refused but a parameter
+    # whose answer could not be read, scored as a parameter that was read and was
+    # clean (D71).
+    vague = [s for s in (scan.get("skipped") or [])
+             if s.get("check") == "inconclusive"]
+    checks.expect(
+        len(vague) == 1 and "MySQL" in (vague[0].get("reason") or ""),
+        "and an unattributable parameter is disclosed, not reported as clean",
         f"skipped={scan.get('skipped')!r}",
     )
     # A20: the token bucket is real.

@@ -355,6 +355,86 @@ def test_a_probe_that_never_got_an_answer_is_an_error_not_a_negative():
     assert not [s for s in ctx.skipped if s.check == "gate"]
 
 
+# ── a check that could not decide is not a check that cleared it (D71) ────────
+
+
+class _AlwaysErroringHttp(_SiteHttp):
+    """A '/search' that prints a database error whatever you send it — a debug page,
+    a broken query behind an unrelated parameter, an app that echoes its last
+    exception. Common enough that ``check_sqli_error`` has a branch for it."""
+
+    _ERROR = "Warning: You have an error in your SQL syntax near ''' at line 1"
+
+    async def get(self, url, *, active=False, params=None, **kwargs):
+        self.gets.append({"url": url, "active": active})
+        path, _ = self._merged(url, params)
+        if path == "/":
+            return _Resp('<html><a href="/search?q=hi">search</a></html>')
+        if path == "/search":
+            return _Resp(f"<html>{self._ERROR}</html>")
+        return _Resp("not found", status_code=404)
+
+
+def test_a_parameter_the_sqli_check_could_not_judge_is_disclosed():
+    """The branch returned ``[]``, the same value as a parameter that was probed and
+    found sound, so a page whose SQL errors make it untestable was reported as a page
+    with no SQL injection. Its own comment said "can't attribute it" and the report
+    said the opposite (D71).
+
+    A skip and not an error: no request failed and nobody refused us, so exit 3 would
+    be asserting a fault that did not occur. The point is only that the two sentences
+    stop being the same sentence."""
+    ctx = _ctx(_AlwaysErroringHttp(), overrides={"checks": ["sqli-error"]})
+    findings = _collect(ctx)
+
+    assert not [f for f in findings if f.rule_id == "dast.active.sqli-error"]
+    inconclusive = [s for s in ctx.skipped if s.check == "inconclusive"]
+    assert len(inconclusive) == 1, ctx.skipped
+    assert "MySQL" in inconclusive[0].reason
+    assert "no verdict" in inconclusive[0].reason
+    assert inconclusive[0].scanner == "dast-active"
+    assert ctx.errors == []
+
+
+def test_a_scan_that_reached_every_verdict_records_no_inconclusive_skip():
+    """The other direction. A check raising ``Inconclusive`` unconditionally would
+    satisfy the test above while never reporting an injection again."""
+    ctx = _ctx(_SqlErrorSiteHttp())
+    findings = _collect(ctx)
+    assert any(f.rule_id == "dast.active.sqli-error" for f in findings)
+    assert not [s for s in ctx.skipped if s.check == "inconclusive"]
+
+
+def test_the_inconclusive_skip_leaves_dast_active_in_the_ran_list():
+    """``check`` has to name the sub-check. The engine keeps a scanner out of
+    ``scanners_run`` when it sees a skip with an *empty* check, so disclosing this as
+    a whole-scanner skip would delete the tier from the "Ran:" line — and every other
+    check it did complete would vanish with it."""
+    ctx = _ctx(_AlwaysErroringHttp())
+    _collect(ctx)
+    assert all(s.check for s in ctx.skipped if s.scanner == "dast-active"), ctx.skipped
+
+
+def test_many_untestable_parameters_collapse_into_one_skip_carrying_the_count():
+    """Keyed by reason rather than by parameter. A site that prints its SQL errors on
+    every page has as many of these as it has parameters, and one skip per parameter
+    turns the report section that exists to be read into one that is not."""
+    params = "&".join(f"p{i}=v{i}" for i in range(6))
+    target = Target(url=f"https://example.com/search?{params}",
+                    scope=Scope(allowed_hosts={"example.com"}))
+    cfg = Config.from_dict({"dast": {"active": {
+        "enabled": True, "max_requests": 50, "checks": ["sqli-error"],
+    }}})
+    ctx = ScanContext(target=target, scope=target.scope,
+                      http=_AlwaysErroringHttp(), config=cfg)
+    _collect(ctx)
+
+    inconclusive = [s for s in ctx.skipped if s.check == "inconclusive"]
+    assert len(inconclusive) == 1, ctx.skipped
+    assert " 6 " in f" {inconclusive[0].reason} ", inconclusive[0].reason
+    assert not [s for s in ctx.skipped if s.check == "budget"]
+
+
 def _crawl_kwargs(monkeypatch, crawler_config):
     """What ``_safe_crawl`` actually passes down, for a given ``dast.crawler``.
 
