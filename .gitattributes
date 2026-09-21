@@ -1,0 +1,19 @@
+# Line endings are a property of this repository, not of whoever cloned it.
+#
+# Every tracked text file was already LF in the index before this file existed --
+# but only because this machine happens to have core.autocrlf=true. That setting
+# defaults to false on Linux and macOS, so the first contributor to edit
+# decisions.md from a clone without it would have committed CRLF, and every later
+# diff touching that file would have been the entire file. text=auto moves the
+# normalisation into the repository, where it holds on any clone regardless of
+# local config.
+#
+# eol=lf also checks out LF on Windows, which is what stops `git add` warning on
+# every commit that it is about to convert. Nothing tracked here cares: Python,
+# Markdown, TOML and YAML are all indifferent, and there are no shell scripts.
+* text=auto eol=lf
+
+# The one tracked file git must never rewrite. Content detection already flags it
+# as binary, but that is a heuristic, and this is the file where being wrong is
+# silent corruption rather than a noisy diff.
+*.pdf binary

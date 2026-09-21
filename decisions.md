@@ -2631,6 +2631,43 @@ That has to hold for its own prose, which is the one surface no test covers.
 
 ---
 
+### D79 — Line endings held because of one machine's git config
+
+**Every `git add` in this repository printed a warning, and the warning was
+right.** "LF will be replaced by CRLF the next time Git touches it" appeared on
+every text file touched, because `core.autocrlf` is `true` on the machine the
+work happens on. The index was clean — `git ls-files --eol` showed `i/lf` for
+every tracked text file and `i/crlf` for none — so the warning read as cosmetic
+and was ignored for seventy-eight decisions.
+
+**It was not cosmetic; it was a statement of where the invariant lived.**
+`core.autocrlf` defaults to `false` on Linux and macOS and is not carried by a
+clone. The LF index was therefore not a property of the repository but of one
+developer's global git config. The first contributor to edit `decisions.md` from
+a clone without that setting would have committed CRLF, and from then on every
+diff touching the largest file here would have been the whole file rather than
+the paragraph that changed — which is the same failure as an unreviewable pull
+request, arrived at by accident.
+
+**`.gitattributes` now states the policy: `* text=auto eol=lf`, plus
+`*.pdf binary`.** `text=auto` normalises to LF in the index on any clone,
+regardless of local config; `eol=lf` checks out LF on Windows too, which is what
+stops the warning rather than merely silencing it. `git add --renormalize .`
+staged no content change, which is the measurement that matters: the policy
+codifies the state the repository was already in instead of rewriting it. The
+PDF gets `binary` explicitly because content detection is a heuristic, and that
+is the one tracked file where a wrong guess is silent corruption instead of a
+noisy diff.
+
+**Why:** This is the same shape as the defects in D49 and D78 — a thing that
+worked for a reason nobody had written down. An instruction that was never
+carried out and a guarantee that holds by coincidence fail the same way: both
+look correct from inside the machine where they happen to be true, and neither
+leaves anything behind to check. A repository that can only be contributed to
+correctly from one laptop is not more portable for having produced no errors yet.
+
+---
+
 ---
 
 ## Part 3 — Concepts Glossary (plain language)
