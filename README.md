@@ -13,8 +13,9 @@ You point it at a URL or a folder and it figures out which checks make sense for
 ## Authorized use only
 
 This tool performs active security testing. In its default mode it makes real requests to
-whatever host you point it at; with `--active` it sends attack-shaped input — injection
-payloads, traversal strings, probe requests — to that host and reads what comes back.
+whatever host you point it at; with `--active` it sends attack-shaped input — cross-site
+scripting payloads, SQL-error probes, crafted redirect targets — to that host and reads
+what comes back.
 
 Run it only against systems you own, or systems whose owner has given you written
 permission to test. Unauthorized scanning is illegal in most jurisdictions regardless of

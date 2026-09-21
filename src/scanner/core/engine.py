@@ -67,9 +67,10 @@ class ScanReport:
     #: A report used to say only what was *found*. What was *done* was not
     #: recorded anywhere, and for the intrusive tier that is the more important
     #: of the two. Measured before this existed: a config file with
-    #: ``dast.active.enabled`` and ``scope.authorized_ack`` set sends injection
-    #: payloads, traversal strings and probe requests to the target while the
-    #: command is a bare ``secscan https://host/`` — no flag in shell history, no
+    #: ``dast.active.enabled`` and ``scope.authorized_ack`` set sends cross-site
+    #: scripting payloads, SQL-error probes and crafted redirect targets to the
+    #: target while the command is a bare ``secscan https://host/`` — no flag in
+    #: shell history, no
     #: line on stderr, and nothing in the report. An active scan that happened to
     #: find nothing was indistinguishable from a passive one.
     #:

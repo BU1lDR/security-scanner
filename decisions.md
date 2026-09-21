@@ -342,10 +342,10 @@ A sink is a **call**. A sink named in a comment or quoted in a string is not one
 ### D50 — The report recorded what was found, not what was done
 
 [D49] surfaced this and deferred it: a config file with `dast.active.enabled` and
-`scope.authorized_ack` set sends injection payloads, traversal strings and probe
-requests to a host while the command is a bare `secscan https://host/`. No flag in
-shell history, no line on stderr, and nothing in the report. An active scan that
-found nothing looked exactly like a passive one.
+`scope.authorized_ack` set sends cross-site scripting payloads, SQL-error probes
+and crafted redirect targets to a host while the command is a bare
+`secscan https://host/`. No flag in shell history, no line on stderr, and nothing
+in the report. An active scan that found nothing looked exactly like a passive one.
 
 The README says unauthorized scanning is illegal in most jurisdictions regardless of
 intent. That makes the report the artifact you keep to show what you did to a host
@@ -2593,6 +2593,44 @@ and both halves of that were in the report all along, one line apart. Suite 642 
 
 ---
 
+### D78 — Five documents described traffic this scanner has never sent
+
+**Four places said `--active` sends "traversal strings."** The README's
+"Authorized use only" section, the `docs/configuration.md` warning about putting
+`authorized_ack` in a file, [D50] above, and the source comment on
+`ScanReport.active_scanners_run`. `ALL_CHECKS` in `scanners/dast_active/checks.py`
+holds three entries — `xss-reflected`, `sqli-error`, `open-redirect` — and there has
+never been a fourth. Nothing in this repo has ever sent a `../` at anything. A fifth
+place, the `dast.exposed.enabled` row in the configuration guide, said the check
+probes for "backups"; `_PROBES` in `dast/exposed.py` is a three-tuple of `.env`,
+`.git/config` and `.git/HEAD`.
+
+**The phrase was written once and copied forward.** [D50] coined "injection
+payloads, traversal strings and probe requests" as a summary of what a config file
+could arm with no flag typed, and the sentence read well enough that the README and
+the configuration guide inherited it verbatim. Its provenance is exactly why it
+survived: every copy pointed at a document that already said it, and at no point was
+the list checked against the dispatch table it claimed to summarise. The same list
+omitted open redirect, so it was wider than the code in one direction and narrower
+in another.
+
+**All five now name what the code does** — "cross-site scripting payloads,
+SQL-error probes, crafted redirect targets" in the four descriptions of traffic, and
+the three literal paths in the exposed-file row. The glossary entry for path
+traversal now carries `*(future scope)*`, the marker SSRF, CSRF and IDOR already
+carried in the same list; without it, traversal sat among the classes this scanner
+actually checks.
+
+**Why:** Two of the five sites are the paragraphs whose entire job is to be
+conservative about what this tool does to a stranger's machine. A warning that
+overstates the traffic is not erring on the safe side — it is the same defect as a
+finding the scanner cannot substantiate, aimed at the reader instead of the target,
+and it spends the credibility that makes the rest of the warning worth reading. The
+standing rule here is that a claim this repo cannot support is worse than no claim.
+That has to hold for its own prose, which is the one surface no test covers.
+
+---
+
 ---
 
 ## Part 3 — Concepts Glossary (plain language)
@@ -2608,7 +2646,7 @@ and both halves of that were in the report all along, one line apart. Suite 642 
 - **XSS (Cross-Site Scripting).** Tricking a site into running attacker-supplied code in another visitor's browser.
 - **SQL Injection (SQLi).** Feeding a form field special text that changes the database query behind it, letting an attacker read or alter data.
 - **Open Redirect.** A link on a trusted site that silently bounces the visitor to an attacker's site.
-- **Path/Directory Traversal.** Tricking a server into serving files it shouldn't (like reading system files).
+- **Path/Directory Traversal.** Tricking a server into serving files it shouldn't (like reading system files). *(future scope)*
 - **SSRF (Server-Side Request Forgery).** Tricking the *server* into making requests on the attacker's behalf, often to reach internal systems. *(future scope)*
 - **CSRF (Cross-Site Request Forgery).** Tricking a logged-in user's browser into performing an action they didn't intend. *(future scope)*
 - **IDOR (Insecure Direct Object Reference).** Changing an ID in a request to access someone else's data (e.g., `/invoice/123` → `/invoice/124`). *(future scope)*

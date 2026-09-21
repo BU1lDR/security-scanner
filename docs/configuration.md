@@ -109,8 +109,9 @@ literally, so turning it on for a scan of `example.com` never points a probe at
 
 `authorized_ack = true` in a config file is the same statement as
 `--i-am-authorized` on the command line, and it has the same effect: combined with
-`dast.active.enabled = true` it sends attack-shaped input — injection payloads,
-traversal strings, probe requests — to the target. Measured, not assumed: a config
+`dast.active.enabled = true` it sends attack-shaped input — cross-site scripting
+payloads, SQL-error probes, crafted redirect targets — to the target. Measured, not
+assumed: a config
 file alone produces identical active findings to the two flags, with no flag typed.
 
 The report now says so, in every format:
@@ -188,7 +189,7 @@ you have a specific need for it to be ambient.
 | --- | --- | --- |
 | `dast.enabled` | `true` | |
 | `dast.tls.enabled` | `true` | Certificate and protocol checks, against the origin the entry URL *landed* on. An `http://` target that redirects to HTTPS is checked, which is the ordinary shape of a site that has configured TLS correctly; it used to be reported as having no certificate to read. |
-| `dast.exposed.enabled` | `true` | Probes for files that should not be public (`.git/`, `.env`, backups), at the origin the entry URL landed on. Still one origin, still only a host `scope.allowed_hosts` permits. A probe that cannot complete is reported as an error and exits `3` rather than counting as "the file is not there" — see D66. |
+| `dast.exposed.enabled` | `true` | Probes three fixed paths that should not be public (`.env`, `.git/config`, `.git/HEAD`), at the origin the entry URL landed on. Still one origin, still only a host `scope.allowed_hosts` permits. A probe that cannot complete is reported as an error and exits `3` rather than counting as "the file is not there" — see D66. |
 | `dast.crawler.max_depth` | `2` | Link depth from the entry URL. Redirects do not spend a level: a site that bounces its own root would otherwise arrive at its front page having used one of your two. When it cuts links off, the report says so as a **skip** naming how many — not an error, because this is the shape of the walk you asked for and a default that binds on most sites would put every scan at exit `3`. Raise it and scan again to close the gap; see D76. |
 | `dast.crawler.max_pages` | `50` | Hard page ceiling. Every request counts, redirect hops included — a hop is traffic to someone else's machine, which is what this bounds. Hitting it is reported as an error naming how many discovered links went unread, never a silent truncation. |
 | `dast.crawler.allow_subdomains` | `false` | Whether `sub.example.com` is in scope for a scan of `example.com`. Widens `scope.allowed_hosts` only — never `scope.active_allowlist`, so no probe reaches a host you did not name. Lookalikes are not subdomains: `notexample.com` stays out. |
