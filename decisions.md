@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 565 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 569 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1858,6 +1858,65 @@ earlier six is about the write-up rather than the code — a documented gap must
 either a fix or a test that fails, because a paragraph explaining why the scan is
 incomplete is indistinguishable, to the person reading the report, from no paragraph
 at all.
+
+---
+
+### D68 — The frozen context in the contract was missing a third of itself
+
+**§10 opens "One context object, one error record", and there have been two since
+D58.** `ScanContext` grew a `skipped` list, an `emit_failure` for failures that were
+reported rather than raised, and an `emit_skip` for work deliberately declined. The
+contract's frozen block listed six of the class's seven fields and two of its four
+methods, and `ScanSkip` — a record type with its own semantics, its own effect on
+`scanners_run` and its own reason for not touching the exit code — did not appear in
+the document at all. An integrator reading §10 as the source of truth it claims to be
+would have built error handling with no idea the second channel existed, which is the
+channel that carries "this check never ran".
+
+**D65 checked the claims it could see and stopped at the section boundary.** It
+compared the names §1 freezes and the integer values §2 freezes, because those were
+the claims that had already gone wrong. §10 through §11 contain four more frozen
+dataclasses, stated as real source, and nothing read them. Writing a checker that
+covers the two sections you already know are broken is the same shape as a test named
+after the loop surviving: it passes on the case that prompted it.
+
+**So the check is now structural rather than enumerated.** `tests/test_contract.py`
+pulls every ` ```python ` block out of the document, finds every `@dataclass` in them,
+resolves each by name against the dataclasses defined under `scanner.core`, and
+compares the field lists exactly and in order — a contract that names a field which
+does not exist breaks the first integrator who sets it, and one that omits a field
+hides part of the type. Documented methods are compared by parameter name, default and
+keyword-only marker, against `inspect.signature`, because `emit_error(scanner, check,
+exc)` is an instruction somebody follows by keyword and a renamed parameter is a
+`TypeError` at their call site with a document saying they were right. Whether a name
+is called or read is compared too: `Finding.fingerprint` is a property, and a block
+showing it as a method sends the reader to `'str' object is not callable`. §3's three
+`Location` constructor bullets are checked the same way, and their set must equal
+Location's own classmethods.
+
+**Adding a section to the document now costs nothing and adding a field costs a
+green test.** The four gates are loops over what the parser found, so the positive
+control that came with D65 gained three more assertions: at least six dataclass blocks
+parsed, §10's methods parsed, §3's three bullets parsed. Without them, reformatting the
+contract would make every comparison iterate over an empty set and the document would
+be certified by not being read (D43).
+
+**Nine mutations, nine red runs, from both sides.** Deleting `skipped` from the
+block, deleting `emit_failure`, deleting the `ScanSkip` block, demoting `fingerprint`
+from a property, dropping `column` from a constructor bullet, and changing
+`@dataclass` to `@dataclasses.dataclass` so the parser stops matching — then the
+same thing from the code: a new field on `ScanSkip`, a renamed parameter on
+`emit_failure`, and `fingerprint` turned back into a method. The last three matter
+most, because the document is not what usually changes. Suite 565 to 569.
+
+**Why:** A frozen schema that is only mostly stated is read as fully stated, and the
+part left out is the part nobody knows to ask about. The three omissions here were not
+obscure — they were the entire mechanism by which this tool distinguishes "found
+nothing" from "could not look", the distinction seven entries of this log are about.
+The lesson is narrower than "document things": when a document is checked against
+code, check it by structure and not by list, because a list is written by whoever
+already knows what is wrong, and the next drift will be somewhere they were not
+looking.
 
 ---
 

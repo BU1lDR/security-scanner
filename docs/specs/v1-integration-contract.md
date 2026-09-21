@@ -325,7 +325,9 @@ decisions.md D45.
 
 ## 10. ScanContext & fault isolation (frozen)
 
-One context object, one error record. No per-scanner variants.
+One context object, two record types, and no per-scanner variants. It was one
+record type until D58; the second exists because "declined to run" and "tried and
+failed" are different answers and only one of them should move the exit code.
 
 ```python
 @dataclass
@@ -336,8 +338,11 @@ class ScanContext:
     config: Config
     logger: Logger
     errors: list[ScanError]
+    skipped: list[ScanSkip]
 
     def emit_error(self, scanner: str, check: str, exc: Exception) -> None: ...
+    def emit_failure(self, scanner: str, check: str, message: str) -> None: ...
+    def emit_skip(self, scanner: str, reason: str, *, check: str = "") -> None: ...
     async def run_check(self, scanner: str, check: str, coro) -> list[Finding]:
         """Await coro; on exception, record a ScanError and return []."""
 ```
@@ -351,6 +356,14 @@ class ScanError:
     traceback_str: str | None = None
 ```
 
+```python
+@dataclass
+class ScanSkip:
+    scanner: str
+    reason: str
+    check: str = ""            # empty means the whole scanner declined
+```
+
 Scanners route every sub-check through `ctx.run_check(...)` (or wrap manually and
 call `ctx.emit_error`). A crashing check becomes a recorded `ScanError` and the
 scan continues (decisions.md D13). Exit code 2 is reserved for engine-level
@@ -358,6 +371,30 @@ failure, never a single check crashing. A recorded `ScanError` is not
 consequence-free, though: it makes the run exit **3** ("ran, but incomplete")
 rather than 0, so a scan whose checks died can no longer be mistaken for a clean
 target (decisions.md D54).
+
+**`emit_failure` is for a failure that was never raised here.** Some checks report
+what went wrong instead of throwing it: a crawl hands back the pages it could not
+fetch, an exposed-file probe the requests that never completed, the SAST walk the
+directories it could not list. Those are still incomplete scans, so they go to the
+same `errors` list and reach the same exit `3` — there is simply no live traceback
+to attach, and inventing one would record this function's own stack instead of the
+failure's (D59, D66, D67).
+
+**`emit_skip` is the other channel and must not be folded into it.** A scanner
+switched off in a config file, a host in scope but not in the active allowlist, a
+file deliberately not read because it is larger than the size bound: none of those
+is a failure, and routing them through `errors` would exit `3` on ordinary runs
+until nobody looked at `3` at all. They are not nothing either — before this
+channel existed they were indistinguishable from work that ran and found the
+target clean (D58). `check` is empty when the whole scanner declined and names the
+sub-check otherwise; the engine keeps a scanner out of `ScanReport.scanners_run`
+only for the empty case, because `dast` with its TLS check disabled did still run.
+
+Both of these were absent from this section for as long as they existed in the
+code — a block marked frozen, listing six of a dataclass's seven fields and two of
+its four methods. `tests/test_contract.py` now compares every dataclass in this
+document to the real one, in both directions, so the next omission fails a gate
+instead of waiting to mislead someone (D68).
 
 The attribute is `http` (not `http_client`, not `client`). Per-scanner extras
 (e.g. a crawl result, an injection budget) are passed as plain arguments to that
