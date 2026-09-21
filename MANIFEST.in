@@ -1,0 +1,32 @@
+# What the sdist ships beyond the package and its tests.
+#
+# The tests were already in it and could not pass: three of them reach outside
+# `tests/` — `test_check_floors.py` runs `tools/check_floors.py` as a subprocess,
+# `test_config.py` reads `docs/configuration.md` to prove the documentation invents
+# no settings, and `test_ci_workflow.py` reads `.github/workflows/` to prove every
+# checked-in gate is actually wired to run. Measured on a clean unpack of the 1.3.1
+# sdist: 5 failed, 37 errors, 494 passed. All of it was missing files, none of it was
+# the scanner — which is the worst possible shape for a test failure, because it
+# teaches whoever sees it that a red suite here means nothing.
+#
+# Shipping them rather than excluding the tests, because a test suite you cannot run
+# is not evidence, and this project's claims about itself are meant to be checkable by
+# the person holding the artifact rather than taken on trust.
+include LICENSE
+include MANIFEST.in
+
+# The reasoning record. The README points at it, `tools/check_test_count.py` reads the
+# test count out of it, and it is the only place that says why any of this is shaped
+# the way it is.
+include decisions.md
+
+recursive-include tools *.py
+recursive-include docs *.md
+recursive-include .github *.yml
+
+# No prune or global-exclude lines. They were here for `.venv`, `.git` and
+# `__pycache__`, and every one of them printed "no previously-included files
+# matching ..." on a clean build: none of those paths is reachable from an
+# `include` above, so there was nothing for them to exclude. Four warnings on
+# every build, guarding nothing, in a repo whose whole argument is that a warning
+# should mean something.

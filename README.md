@@ -42,11 +42,17 @@ secscan path/to/code
 secscan https://example.com
 ```
 
-If you'd rather not install it, you can run it straight from the source instead:
+If you'd rather not install the package itself, you can run it straight from the source —
+but its four dependencies still have to be there, so this is one step shorter rather than
+zero steps:
 
 ```bash
+pip install httpx beautifulsoup4 cryptography packaging
 PYTHONPATH=src python -m scanner.cli path/to/code
 ```
+
+Without that first line the second one stops at `ModuleNotFoundError: No module named
+'httpx'` before it reads a single file. This section used to show only the second line.
 
 ## A few things you can do
 
@@ -61,9 +67,14 @@ secscan path/to/code --severity-threshold high
 # add AI explanations (needs an Anthropic API key in your environment)
 export ANTHROPIC_API_KEY=sk-...
 secscan path/to/code --ai
+
+# which build produced a report you're holding
+secscan --version
 ```
 
 The scan exits `0` when it's clean, `1` when it finds something at or above your severity threshold, `2` if something actually broke, and `3` when the scan ran but some check errored — meaning the report is real but not a complete answer. That's the usual convention, so it drops straight into a CI pipeline.
+
+A report that can't be written counts as `2`, not `1`. `--output` is checked before the scan starts, so a mistyped directory costs you nothing instead of a full run; and if the write fails anyway, the exit code says the tool failed rather than borrowing the code that means "we found something".
 
 If you branch on the exact code rather than on "nonzero", handle `3`. Treating it as pass is the failure this tool is most careful about elsewhere: a scan that could not finish looking should not report the same thing as a scan that looked and found nothing.
 

@@ -41,6 +41,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from scanner import __version__
 from scanner.ai.advisor import build_advisor
 from scanner.core.config import Config
 from scanner.core.egress import Egress
@@ -48,7 +49,7 @@ from scanner.core.engine import Engine
 from scanner.core.finding import Severity
 from scanner.core.gate import RequestGate
 from scanner.core.http import AsyncHttpClient
-from scanner.core.reporting import render
+from scanner.core.reporting import render, summary_line
 from scanner.core.scope import Scope
 from scanner.core.target import Target
 
@@ -110,7 +111,56 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Increase logging verbosity (-v, -vv).",
     )
+    # A scanner's own version is part of every report it produces: "no findings"
+    # means something different from a build six releases back, and an operator
+    # holding a report has no other way to ask which one produced it. The string is
+    # the same one `http.user_agent` sends, from the single definition in
+    # `scanner/__init__.py`, so the answer this prints and the answer the scanned
+    # party sees in their log cannot drift apart.
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"secscan {__version__}",
+        help="Print the version and exit.",
+    )
     return p
+
+
+def _unwritable(path: str) -> str | None:
+    """Why ``--output PATH`` could not be written, or ``None`` if it can be.
+
+    Checked *before* the scan rather than after it, because the alternative is what
+    this did until D64: a full run — minutes of rate-limited requests to somebody
+    else's machine — discarded by a traceback on a mistyped directory, with the
+    report existing nowhere. Failing on the typo costs nothing and sends nothing.
+
+    The write is still guarded at the end. This is not the same check twice: a path
+    can stop being writable between the two, and a check whose result is trusted
+    later is a check that has become an assumption.
+    """
+    target = Path(path)
+    if target.is_dir():
+        return "it is a directory"
+    parent = target.parent
+    if not parent.exists():
+        return f"{parent} does not exist"
+    if not parent.is_dir():
+        return f"{parent} is not a directory"
+    existed = target.exists()
+    try:
+        # Opening is the only honest test: permissions, read-only mounts, locked
+        # files and Windows ACLs are not all visible to os.access. Append mode so
+        # an existing report is not truncated by a scan that may yet fail.
+        with target.open("a", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    if not existed:
+        # The check created it, so the check removes it. Conditioned on `existed`
+        # and not on the size, because an empty file the operator made themselves is
+        # theirs, and a probe that tidies up other people's files is not a probe.
+        target.unlink(missing_ok=True)
+    return None
 
 
 def _classify_target(raw: str) -> tuple[str, str]:
@@ -269,6 +319,13 @@ def main(argv: list[str] | None = None, *, engine=None) -> int:
         print(f"secscan: could not load config {args.config!r}: {exc}", file=sys.stderr)
         return 2
 
+    if args.output and (why := _unwritable(args.output)) is not None:
+        # Before the engine, deliberately: this is the same class as a bad --config
+        # path, and both are things to find out about while nothing has been sent.
+        print(f"secscan: cannot write the report to {args.output!r}: {why}",
+              file=sys.stderr)
+        return 2
+
     config = config.merged(_cli_overrides(args))
     active_enabled = bool(config.get("dast.active.enabled"))
 
@@ -310,7 +367,19 @@ def main(argv: list[str] | None = None, *, engine=None) -> int:
         return 2
 
     if args.output:
-        Path(args.output).write_text(rendered, encoding="utf-8")
+        try:
+            Path(args.output).write_text(rendered, encoding="utf-8")
+        except OSError as exc:
+            # Exit 2, not the findings code. `1` means "findings at or above the
+            # threshold" (D14), so returning it here would make a scan whose report
+            # went nowhere indistinguishable from one whose report said there was a
+            # problem — and the operator's next action for those two is not the same.
+            # The counts go on stderr because the run itself succeeded and they are
+            # the only part of it that survives.
+            print(f"secscan: the scan finished but the report could not be written "
+                  f"to {args.output!r}: {exc.strerror or exc}", file=sys.stderr)
+            print(f"secscan: {summary_line(report)}", file=sys.stderr)
+            return 2
     else:
         print(rendered)
 

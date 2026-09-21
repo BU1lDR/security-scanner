@@ -10,7 +10,14 @@ requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "security-scanner"
+# `security-scanner` is taken on PyPI — a different project by a different author,
+# at 0.1.4 — so this name could never have been published, and anyone who typed
+# `pip install security-scanner` would have got that package rather than this one.
+# `secscan` was free and is what everything else here already says: the console
+# script, the User-Agent the scanned party sees, the docs. Nothing reads the
+# distribution name at runtime (no `importlib.metadata` call anywhere), so this is
+# metadata-only; the module stays `scanner` and the command stays `secscan`.
+name = "secscan"
 # Read from scanner/__init__.py rather than written here. It was written here, and
 # the two disagreed: this said 1.0.0 while the package said 0.1.0 and the default
 # User-Agent said 0.1. A release number in three places is a release number that
@@ -19,7 +26,11 @@ dynamic = ["version"]
 description = "A unified SAST + DAST + SCA security scanner with an optional AI advisor."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+# An SPDX string, not a TOML table. The table form is deprecated and setuptools
+# says builds using it stop being supported on 2027-02-18 — a build that warns
+# today and fails on a date is a build that is already broken, just not yet.
+license = "MIT"
+license-files = ["LICENSE"]
 # Deliberately no `anthropic` SDK: the AI provider talks to the API over the
 # shared httpx client so every request passes the one HTTP choke point and its
 # egress allowlist (decisions.md D40, contract §9). An SDK with its own

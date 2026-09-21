@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 530 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 541 tests. Integration seams are in `docs/specs/v1-integration-contract.md` and were held to. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1553,6 +1553,96 @@ identity sent all their traffic under one name and could not tell the two kinds 
 The other promised a *restriction* the code lacked, so a reader auditing how attack
 traffic gets armed was told a human had to be present when a file was enough. Coverage
 claims and safety claims fail by the same mechanism, and only one of them fails quietly.
+
+---
+
+### D64 — What shipped was not what the packaging said, and a lost report exited 1
+
+**`security-scanner` is taken.** It is a different author's project on PyPI, at 0.1.4.
+So this distribution name could never have been published, and anybody who typed
+`pip install security-scanner` on the strength of it got that package instead. Every
+other name in the repo already said `secscan` — the console script, the User-Agent the
+scanned party sees in their log, the docs, the `--version` output added below. Nothing
+reads the distribution name at runtime (there is no `importlib.metadata` call anywhere
+in `src/`, `tools/` or `tests/`), so the rename is metadata and nothing else: the
+module stays `scanner`, the command stays `secscan`, and `secscan` on PyPI was free.
+
+**The sdist shipped a test suite that could not pass.** `tests/` was in it; `tools/`,
+`docs/`, `.github/` and `decisions.md` were not, and three test files reach for exactly
+those — `test_check_floors.py` runs `tools/check_floors.py` as a subprocess,
+`test_config.py` reads `docs/configuration.md` to prove the documentation invents no
+settings, and `test_ci_workflow.py` reads `.github/workflows/` to prove every
+checked-in gate is wired to something that runs. Measured on a clean unpack of the
+1.3.1 sdist: **5 failed, 37 errors, 494 passed**. Every one of them a missing file and
+none of them the scanner.
+
+**Which is worse than shipping no tests at all.** A suite that cannot run is an absence;
+a suite that runs red for reasons that are not the code teaches whoever ran it that red
+means nothing here, and that is the one lesson this repo cannot afford to teach. A
+`MANIFEST.in` ships the four paths, and the same unpack now runs **536 of 536**. The
+manifest carries no `prune` or `global-exclude` lines: they were for `.venv`, `.git` and
+`__pycache__`, none of which is reachable from an `include`, and all four of them printed
+"no previously-included files matching …" on every build — warnings guarding nothing,
+in a repo whose argument is that a warning should mean something.
+
+**Guarded by reading the manifest, not by building.** `tests/test_packaging.py` scans the
+suite for `parent.parent / "…"` and `ROOT / "…"` reaches and requires each name to be
+shipped. That runs in milliseconds with no `build` dependency and no network, and it
+catches the thing that actually rots: the *next* test file that reaches for a directory
+nobody remembered to ship. Its first assertion is the positive control, because a subset
+check against an empty set passes — if the pattern stops matching this suite, the gate
+has to say so rather than go quiet (D43).
+
+**`license = { text = "MIT" }` was a build that fails on a date.** setuptools deprecated
+the table form and names the day it stops being supported: 2027-02-18. It is an SPDX
+string plus `license-files` now, which is what setuptools 77+ wants and this project
+already requires 83. The build prints no warnings at all.
+
+**A report that could not be written exited 1.** `Path(args.output).write_text(...)` was
+unguarded, so `--output d:/tmp/does/not/exist/r.json` produced a `FileNotFoundError`
+traceback and exit **1** — and 1 means "findings at or above the threshold" (D14). A
+scan whose report went nowhere was indistinguishable from one whose report said there
+was a problem, which is D42's conflation in the one place it is trivially avoidable:
+the two next actions are "fix your path" and "fix your code".
+
+**Checked before the scan, not only after it.** `--output` is now validated beside
+`--config`, before the engine is touched, because the alternative is what this did: spend
+the expensive, externally-visible half of the run — minutes of rate-limited requests to
+somebody else's machine — and then throw the result away over a typo. Failing on the
+typo costs nothing and sends nothing. The probe opens the file in append mode, because
+permissions, read-only mounts, locked files and Windows ACLs are not all visible to
+`os.access`, and it removes the file only if it created it: an empty file the operator
+made is theirs, and a check that tidies up other people's files is not a check. The write
+is still guarded at the end, and that is not the same check twice — a path can stop
+being writable in between, and a check whose result is trusted later has become an
+assumption.
+
+**There was no way to ask which build produced a report.** `--version` prints
+`secscan <version>` from the single definition in `scanner/__init__.py`, the same one
+`http.user_agent` sends, so the number in a report and the number in the scanned party's
+access log cannot drift apart — a test asserts that rather than asserting a literal. "No
+findings" means something different from a build six releases back, and an operator
+holding a report had no way to date it.
+
+**One line moved rather than grew.** The severity tally was built twice, in the terminal
+renderer and the HTML renderer, with the five severity names retyped in each. The CLI's
+message for an unwritten report needed it a third time, which is when a duplication stops
+being tolerable, so `reporting.summary_line` is the one place it is spelled.
+
+**And the README told you to run something that cannot run.** "If you'd rather not
+install it, you can run it straight from the source instead:
+`PYTHONPATH=src python -m scanner.cli path/to/code`" — which stops at
+`ModuleNotFoundError: No module named 'httpx'` before reading a file, because skipping
+the install skips the four dependencies too. It names them now.
+
+**Why:** Everything here is the gap between what an artifact says about itself and what it
+is, and the packaging half matters for the same reason the scanning half does. A
+distribution named after someone else's package, a shipped suite that cannot pass, a
+build that warns on a deadline, a report that vanishes while the exit code says
+"vulnerability found", and install instructions that do not install — each one is a
+claim the thing itself contradicts. A tool whose entire argument is that you should not
+have to take its word for anything has to be checkable at the edges too, because the
+edges are what a stranger meets first.
 
 ---
 

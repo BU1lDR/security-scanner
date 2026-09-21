@@ -1,7 +1,9 @@
 import json
+from pathlib import Path
 
 import pytest
 
+from scanner import USER_AGENT, __version__
 from scanner.cli import main
 from scanner.core.engine import Engine
 from scanner.core.finding import Confidence, Finding, Severity
@@ -131,6 +133,105 @@ def test_output_is_written_to_file(tmp_path):
     assert code == 1
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert doc["findings"][0]["rule_id"] == "sast.secret.aws-access-key"
+
+
+# --- a report that cannot be written (D64) ---
+
+class _CountingEngine(Engine):
+    """Records whether the scan was ever started."""
+
+    def __init__(self):
+        super().__init__(registry=Registry())
+        self.runs = 0
+
+    async def run(self, target, **kwargs):
+        self.runs += 1
+        return await super().run(target, **kwargs)
+
+
+def test_an_unwritable_output_path_is_refused_before_anything_is_scanned(tmp_path, capsys):
+    """The scan is the expensive, externally-visible half: minutes of rate-limited
+    requests to somebody else's machine. Spending it and then discarding the result
+    on a mistyped directory is the wrong order, so `--output` is validated beside
+    `--config`, before the engine is touched."""
+    engine = _CountingEngine()
+    code = main([str(tmp_path), "--output", str(tmp_path / "no" / "such" / "r.json")],
+                engine=engine)
+    assert code == 2
+    assert engine.runs == 0, "a bad output path must cost no traffic at all"
+    err = capsys.readouterr().err
+    assert "cannot write the report" in err and "does not exist" in err
+
+
+def test_an_output_path_that_is_a_directory_is_refused(tmp_path, capsys):
+    engine = _CountingEngine()
+    assert main([str(tmp_path), "--output", str(tmp_path)], engine=engine) == 2
+    assert engine.runs == 0
+    assert "it is a directory" in capsys.readouterr().err
+
+
+def test_the_writability_check_leaves_the_filesystem_as_it_found_it(tmp_path):
+    """It probes by opening, which is the only honest test on Windows — and an
+    opening probe creates files. Two things it must not do: leave behind a file
+    nobody asked for, and touch one that was already there."""
+    fresh = tmp_path / "fresh.json"
+    existing = tmp_path / "existing.json"
+    existing.write_text("previous report", encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.touch()
+
+    for path in (fresh, existing, empty):
+        main([str(tmp_path), "--config", str(tmp_path / "nope.json"),
+              "--output", str(path)], engine=_code_engine([]))
+
+    assert not fresh.exists(), "the check created a file and did not remove it"
+    assert existing.read_text(encoding="utf-8") == "previous report"
+    # Empty and not ours: `existed` is what decides, not the size, because an empty
+    # file the operator made is theirs.
+    assert empty.exists()
+
+
+def test_a_report_that_cannot_be_written_exits_two_not_one(tmp_path, capsys, monkeypatch):
+    """Exit 1 means "findings at or above the threshold" (D14). A scan whose report
+    went nowhere must not borrow that code: the operator's next action is to fix the
+    path, not to fix the code. This is the case the pre-flight check cannot cover —
+    the path stopped being writable after it passed — so it is a second guard rather
+    than the same check twice."""
+    out = tmp_path / "report.json"
+    real = Path.write_text
+
+    def exploding(self, *a, **kw):
+        if self == out:
+            raise OSError(13, "Permission denied")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", exploding)
+    code = main([str(tmp_path), "--format", "json", "--output", str(out)],
+                engine=_code_engine([_finding(severity=Severity.CRITICAL)]))
+    assert code == 2, "a CRITICAL finding must not turn a failed write into exit 1"
+    err = capsys.readouterr().err
+    assert "could not be written" in err and "Permission denied" in err
+    # The tally is the only part of a successful scan that survives, so it is said.
+    assert "1 critical" in err and "1 findings" in err
+
+
+# --- the version (D64) ---
+
+def test_version_prints_the_one_definition_and_exits_zero(capsys):
+    """A report with no version on it cannot be dated, and there was no way to ask.
+    Asserted against `scanner.__version__` rather than a literal: a second spelling
+    of a release number is a spelling that will be wrong (see `pyproject.toml`, which
+    reads it from there for the same reason)."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"secscan {__version__}"
+
+
+def test_the_version_printed_is_the_version_the_target_sees():
+    """The two must not be able to drift: an operator reading their own access log
+    and an operator reading a report have to be able to compare the two numbers."""
+    assert __version__ in USER_AGENT
 
 
 # --- failure handling ---

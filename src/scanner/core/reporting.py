@@ -98,6 +98,21 @@ def _severity_counts(findings: list[Finding]) -> dict[str, int]:
     return {sev.name.lower(): counts.get(sev, 0) for sev in _SEVERITY_ORDER}
 
 
+def summary_line(report) -> str:
+    """The severity tally as one line, in one place.
+
+    Three callers need the same sentence now — the terminal report, the HTML report,
+    and the CLI's message for a report that was produced and could not be written
+    (D64). It was written out twice with the severity names retyped in each, which is
+    how a tally starts meaning two things; the third copy is what made that worth
+    fixing rather than noting.
+    """
+    counts = _severity_counts(report.findings)
+    tally = ", ".join(f"{counts[sev.name.lower()]} {sev.name.lower()}"
+                      for sev in _SEVERITY_ORDER)
+    return f"{tally} ({len(report.findings)} findings)"
+
+
 def _finding_dict(f: Finding) -> dict:
     loc = f.location
     loc_fields = {
@@ -172,9 +187,7 @@ def _render_terminal(report: ScanReport, target) -> str:
                     lines.append(f"    fix ({tag}): {f.fix.description}")
             lines.append("")
 
-    counts = _severity_counts(report.findings)
-    summary = ", ".join(f"{counts[s]} {s}" for s in ("critical", "high", "medium", "low", "info"))
-    lines.append(f"Summary: {summary} ({len(report.findings)} findings)")
+    lines.append(f"Summary: {summary_line(report)}")
 
     if report.errors:
         lines.append("")
@@ -240,9 +253,7 @@ def _render_html(report: ScanReport, target) -> str:
         emphasis = "strong" if line.startswith("ACTIVE") else "span"
         parts.append(f"<p><{emphasis}>{esc(line)}</{emphasis}></p>")
 
-    counts = _severity_counts(report.findings)
-    summary = ", ".join(f"{counts[s]} {s}" for s in ("critical", "high", "medium", "low", "info"))
-    parts.append(f"<p>Summary: {esc(summary)} ({len(report.findings)} findings)</p>")
+    parts.append(f"<p>Summary: {esc(summary_line(report))}</p>")
 
     if not report.findings:
         parts.append("<p>No findings.</p>")
