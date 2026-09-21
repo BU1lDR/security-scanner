@@ -313,3 +313,33 @@ def test_the_long_line_skip_leaves_sast_in_the_scanners_that_ran(tmp_path):
     assert [s.check for s in report.skipped] == ["long-line"]
     assert _ids(report.findings) == {"sast.sink.python-eval"}
     assert report.errors == []
+
+
+def test_generated_text_declined_by_extension_reaches_the_report(tmp_path):
+    """The walk's third policy decline, end to end. Measured with one key in two
+    files: `AKIAIOSFODNN7EXAMPLE` in `app.min.js`, which the extension filter rejects
+    before opening, and in `config.js`, which it reads. Only the second was reported,
+    and the first appeared in no section of the report at all (D73)."""
+    (tmp_path / "app.min.js").write_bytes(f'var k="{_KEY}";\n'.encode())
+    (tmp_path / "config.js").write_bytes(f'var k = "{_KEY}";\n'.encode())
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00")
+
+    ctx = _ctx(tmp_path)
+    assert "sast.secret.aws-access-key" in _ids(_collect(ctx))
+
+    generated = [s for s in ctx.skipped if s.check == "generated"]
+    assert len(generated) == 1, ctx.skipped
+    assert generated[0].reason.startswith("1 file was not read")
+    assert "not examined" in generated[0].reason
+    assert ctx.errors == []
+
+
+def test_a_tree_of_images_alone_records_no_generated_skip(tmp_path):
+    """The split asserted from the scanner's side too. Every repository has images and
+    a skip line about them would be read once and then never again."""
+    (tmp_path / "app.py").write_bytes(b"eval(x)\n")
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00")
+    (tmp_path / "font.woff2").write_bytes(b"\x00wOF2")
+    ctx = _ctx(tmp_path)
+    assert _ids(_collect(ctx)) == {"sast.sink.python-eval"}
+    assert ctx.skipped == []

@@ -168,6 +168,48 @@ def test_a_readable_tree_reports_no_problems_at_all(tmp_path):
     assert problems == []
 
 
+# ── the third policy decline, which had no record (D73) ───────────────────────
+
+
+def test_minified_and_generated_text_is_declined_out_loud(tmp_path):
+    """The extension filter rejects before any I/O, so it never had a path object to
+    hang a problem on — and that reads as an optimisation rather than as the third
+    branch of a policy whose other two both report. These four hold code: a secret in
+    a bundle or a source map was not reported and not mentioned either."""
+    for name in ("app.min.js", "theme.min.css", "vendor.js.map", "icon.svg"):
+        (tmp_path / name).write_text("var k = 1;\n", encoding="utf-8")
+    problems = []
+    found = list(iter_source_files(tmp_path, problems=problems))
+
+    assert found == []                      # still not read: the bound is the policy
+    assert _kinds(problems) == ["generated"] * 4
+    assert all(p.kind not in INCOMPLETE_KINDS for p in problems)
+    assert {Path(p.path).name for p in problems} == {
+        "app.min.js", "theme.min.css", "vendor.js.map", "icon.svg",
+    }
+
+
+def test_media_is_declined_silently_because_there_is_no_code_in_it(tmp_path):
+    """The other half of the split, and the reason it is a split. One aggregated skip
+    line is the whole budget for this, and spending it on the images every repository
+    contains is how a disclosure stops being read."""
+    for name in ("logo.png", "clip.mp4", "font.woff2", "sheet.xlsx", "lib.jar"):
+        (tmp_path / name).write_bytes(b"\x00binary")
+    problems = []
+    assert list(iter_source_files(tmp_path, problems=problems)) == []
+    assert problems == []
+
+
+def test_a_lockfile_is_left_to_sca_to_disclose(tmp_path):
+    """SCA walks the same tree without this filter and reports every lockfile it finds
+    as its own coverage gap, naming the ecosystem it did not check. A second line from
+    SAST saying the same file went unread is the report padding itself."""
+    (tmp_path / "Gemfile.lock").write_text("rails (6.0.0)\n", encoding="utf-8")
+    problems = []
+    assert list(iter_source_files(tmp_path, problems=problems)) == []
+    assert problems == []
+
+
 def test_the_walk_still_runs_with_no_problem_sink(tmp_path, monkeypatch):
     """``problems`` is optional, and a failure with nowhere to go must not raise —
     the sink is a report channel, not a control-flow one."""

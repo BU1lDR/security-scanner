@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 595 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 600 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -2214,6 +2214,67 @@ notice, and reads as a performance decision rather than a coverage one. That is 
 useful generalisation — the sweep for silent non-answers has been reading exception
 handlers and early returns, and a `continue` inside a loop is the same thing with
 none of the tells.
+
+---
+
+### D73 — Minified text was declined before it was opened, and the report never said so
+
+**The extension filter was doing two jobs and disclosing neither.** `_ASSET_EXTENSIONS`
+is checked against a filename before any I/O, and everything it matches leaves the
+walk by a bare `continue`. Half of that set is media — `.png`, `.mp4`, `.woff2`,
+`.xlsx` — where there is no source to examine and no coverage claim being made. The
+other half is text this scanner reads fluently and declines anyway: `.min.js`,
+`.min.css`, `.map`, `.svg`. A minified bundle, a source map and an inline-script SVG
+all hold code, and a secret in one of them was not reported and not mentioned either.
+
+**The third branch of a policy whose other two both report.** D67 split the walk's
+reasons into failures and policy declines, and the scanner aggregates each decline
+into one skip: *N files were not read because they are over the 1 MB size limit*, *N
+files were not read because they are not text*. D72 extended that one layer in to the
+line-length bound. This was the remaining one, and it was invisible for a structural
+reason the other two did not have: `too-large` and `binary` are decided after a `stat`
+or a `read_bytes`, so there was already a path object in hand and a natural place to
+hang a `WalkProblem`. The extension check rejects on a string, in the cheapest branch
+of the loop, which reads as an optimisation rather than as a coverage decision.
+
+**Measured with one key in two files, the way D72 was.** `AKIAIOSFODNN7EXAMPLE` in
+`app.min.js` and the same key in `config.js`. The report named `config.js:1` and
+`app.min.js` appeared in no section of it at all.
+
+**A three-way split, not a blanket disclosure.** Adding every asset extension to the
+record would have been the smaller change and the wrong one. One aggregated skip line
+is the entire budget for this, every repository contains images, and a line about them
+on every scan is how a disclosure stops being read — the same reasoning that keeps a
+404 out of the crawler's `INCOMPLETE_KINDS`. So `_DECLINED_TEXT_EXTENSIONS` names only
+the text. The compiled artifacts — `.jar`, `.class`, `.pyc`, `.so` — stay out for the
+opposite reason: a regex matcher cannot examine them at all, so declining them is not a
+choice it could reverse. `.lock` stays out for a third reason: SCA walks the same tree
+without this filter and already reports every lockfile as its own coverage gap, naming
+the ecosystem it did not check, so a second line from SAST is the report padding
+itself.
+
+**A skip, and the kind reaches the sentence table.** `generated` is added to
+`_DECLINED_REASON` rather than left to fall back to its slug, because the fallback
+exists so a new kind cannot take the scan down on its way to being described, not so a
+kind can ship undescribed. It stays out of `INCOMPLETE_KINDS`: a tool that exits 3
+because a checkout contains a bundle has spent exit 3 on nothing.
+
+**Sixth time a green test was pinning the defect.**
+`test_iter_skips_asset_extensions` asserted that `logo.png` was not among the files
+yielded, which is true under the defect and true after the fix, because it asks only
+what the walk returned and never what it recorded. A test of a security check that
+cannot tell "we looked and found nothing" from "we did not look" is not a complete
+assertion about that check — D57, D66, D70, D71 and D72 were each found the same way.
+Eight mutations confirm the new tests: dropping the record, recording every asset
+including media, restoring `.lock`, removing `.min.js`, promoting the kind to a
+failure, deleting its sentence, weakening its sentence, and reading the file after
+declining it. All eight fail.
+
+**Why:** A scanner's report is a claim about coverage, and the cheapest branch in the
+loop was making the largest silent exception to it. The bound itself is right —
+matching 17 regexes against generated output buys nothing — but "we chose not to read
+this" and "there is nothing in this" are different statements, and only one of them
+was reaching the operator. Suite 595 to 600.
 
 ---
 

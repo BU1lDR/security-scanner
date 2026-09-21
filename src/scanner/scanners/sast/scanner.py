@@ -50,6 +50,8 @@ _DEFAULT_EXCLUDES = DEFAULT_EXCLUDE_DIRS
 _DECLINED_REASON = {
     "too-large": "over the 1 MB size limit",
     "binary": "not text",
+    "generated": "minified or generated text this scan does not read, so any code "
+                 "inside them was not examined",
 }
 _CONFIDENCE = {
     "tentative": Confidence.TENTATIVE,

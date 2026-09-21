@@ -41,6 +41,21 @@ _ASSET_EXTENSIONS = frozenset({
     ".lock", ".map", ".min.js", ".min.css",
 })
 
+#: The subset of the above that is *text this scanner could have read*, and declines
+#: anyway. That difference is the one ``WalkProblem`` exists to record: there is no
+#: source in a ``.png`` and saying so on every scan would spend the skip line that
+#: ``too-large`` and ``binary`` need, but a minified bundle, a source map and an
+#: inline-script SVG all hold code, and a secret in one of them was not reported and
+#: not mentioned either (D73).
+#:
+#: ``.lock`` is deliberately absent. SCA walks the same tree without this filter and
+#: reports every lockfile it finds as its own coverage gap, naming the ecosystem; a
+#: second line from SAST saying the same file went unread is the report padding
+#: itself. The compiled artifacts (``.jar``, ``.class``, ``.pyc``, ``.so``) are absent
+#: for the opposite reason: a regex matcher cannot examine them at all, so declining
+#: them is not a choice it could reverse.
+_DECLINED_TEXT_EXTENSIONS = frozenset({".svg", ".map", ".min.js", ".min.css"})
+
 _DEFAULT_MAX_BYTES = 1_000_000  # 1 MB: skip generated/minified/data blobs
 
 
@@ -51,10 +66,15 @@ class WalkProblem:
     ``kind`` is a stable slug the caller dispatches on, because these are not the
     same kind of thing. ``unlistable-dir`` and ``unreadable-file`` are the machine
     refusing us — we asked and could not look, so the answer for that subtree is
-    unknown. ``too-large`` and ``binary`` are *policy*: we could have read them and
-    chose not to, under a documented bound. Collapsing the two groups is what the
-    single ``None`` return did, and it is the difference between "nothing here" and
-    "we never looked".
+    unknown. ``too-large``, ``binary`` and ``generated`` are *policy*: we could have
+    read them and chose not to, under a documented bound. Collapsing the two groups is
+    what the single ``None`` return did, and it is the difference between "nothing
+    here" and "we never looked".
+
+    ``generated`` was the last of the three to get a record, because the extension
+    filter rejects before any I/O and so never had a path object to hang a problem on
+    — which reads as an optimisation rather than as the third branch of a policy that
+    discloses its other two (D73).
     """
 
     path: str
@@ -114,6 +134,11 @@ def iter_source_files(
         dirnames[:] = [d for d in dirnames if d not in exclude]
         for fn in filenames:
             if _is_asset(fn):
+                if _is_declined_text(fn):
+                    sink.append(WalkProblem(
+                        str(Path(dirpath) / fn), "generated",
+                        "declined by extension before it was opened",
+                    ))
                 continue
             path = Path(dirpath) / fn
             try:
@@ -159,3 +184,8 @@ def read_text_file(
 def _is_asset(filename: str) -> bool:
     name = filename.lower()
     return any(name.endswith(ext) for ext in _ASSET_EXTENSIONS)
+
+
+def _is_declined_text(filename: str) -> bool:
+    name = filename.lower()
+    return any(name.endswith(ext) for ext in _DECLINED_TEXT_EXTENSIONS)
