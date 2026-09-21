@@ -179,7 +179,7 @@ you have a specific need for it to be ambient.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `sast.enabled` | `true` | |
-| `sast.exclude_dirs` | same as `sca.exclude_dirs` | Same semantics, separate setting. These two were reading different lists for most of the project's life; they are now spelled out independently so a change to one is a deliberate change to one. |
+| `sast.exclude_dirs` | same as `sca.exclude_dirs` | Same semantics, separate setting. These two were reading different lists for most of the project's life; they are now spelled out independently so a change to one is a deliberate change to one. A directory you did *not* exclude and the walk could not list — a permission denial, a dead junction — is reported as an error and exits `3`, because everything under it went unscanned and that is not the same answer as "nothing under it matched"; see D67. |
 | `sast.min_confidence` | `"tentative"` | Drop rules below this confidence before scanning. One of `tentative`, `firm`, `confirmed`. Raising it trades recall for precision. |
 
 ## `dast` — the live-site checks

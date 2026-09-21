@@ -84,6 +84,8 @@ A report that can't be written counts as `2`, not `1`. `--output` is checked bef
 
 If you branch on the exact code rather than on "nonzero", handle `3`. Treating it as pass is the failure this tool is most careful about elsewhere: a scan that could not finish looking should not report the same thing as a scan that looked and found nothing.
 
+That applies to the code side too, not just the network side. A directory the walk could not list, or a file it could not open, is named in the report and exits `3` — until D67 both were silently dropped, so a folder scan of a tree with an unreadable `src/` exited `0` with nothing to say about it. Files deliberately not read — over 1 MB, or not text at all — are listed separately as skips and don't touch the exit code.
+
 ## Settings
 
 Anything you'd rather not retype every run goes in a TOML or JSON file:

@@ -34,6 +34,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
+from scanner.core.context import why_exception
 from scanner.scanners.dast.redirects import (
     HTTP_SCHEMES, MAX_HOPS, REDIRECT_KINDS, next_hop,
 )
@@ -120,21 +121,6 @@ def _is_html(resp) -> bool:
     if callable(getter):
         ctype = resp.headers.get("content-type", "") or ""
     return "html" in ctype.lower()
-
-
-def why_exception(exc: BaseException) -> str:
-    """An exception as one short line, class name included.
-
-    The class name is not decoration: ``ConnectTimeout`` and ``ConnectError`` carry
-    different remedies, and several httpx exceptions stringify to the empty string,
-    which would otherwise reach a report as a blank reason.
-
-    Public, and named rather than left as ``_why``, because ``exposed.py`` needs the
-    same convention (D66) and two copies of "how a failure is described to the
-    operator" is how the two descriptions drift apart.
-    """
-    text = str(exc).strip()
-    return f"{exc.__class__.__name__}: {text}" if text else exc.__class__.__name__
 
 
 async def _get(http, url: str, headers: dict | None) -> tuple[object | None, str | None]:

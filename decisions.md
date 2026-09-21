@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 554 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 565 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1784,6 +1784,80 @@ from a real negative, and a test that checks the loop survived rather than what 
 said. The answer is always the same too — carry the failure out alongside the result and
 make the caller decide — and the reason to keep writing it down is that the next
 occurrence will look like ordinary defensive code, because all of these did.
+
+---
+
+### D67 — A folder scan that could not read your code still exited clean
+
+**Three sites in one small module, all of them a `try` that returns nothing.**
+`sast/walk.py` finds and reads the files SAST scans, and it had no way to say it had
+failed at either. `os.walk` was called without `onerror`, and `os.walk` swallows every
+error from listing a directory unless it is given one — so a directory the process
+could not open contributed no files, no exception and no message, and every file
+beneath it left the scan silently. `path.stat()` was wrapped in `except OSError:
+continue`, which is the same hole one file wide. And `read_text_file` returned a bare
+`None` for three unrelated reasons: over `max_bytes`, contains a NUL byte, or the open
+raised. Its only caller wrote `if text is None: continue`, so "we chose not to read
+this" and "we could not read this" ended at the same line. This is the code path the
+README recommends to anyone without written authorization to test a host, which makes
+it the path most likely to be someone's only use of the tool.
+
+**The docstring already said so, and that changed nothing.** `sast/scanner.py`'s module
+docstring described this gap in four accurate sentences — that `walk` returns `None`
+for three cases, that the loop skips them before `run_check`, that they therefore
+reach neither `report.errors` nor the exit code. It was written when an earlier edit
+found the claim reversed, and it has been correct and load-bearing-free ever since.
+A known defect with a good write-up beside it is worse than an unknown one, because
+the write-up discharges the feeling that something needs doing.
+
+**Which reasons escalate is the whole design.** `WalkProblem` carries `path`, `kind`
+and `detail`, and `INCOMPLETE_KINDS` — `unlistable-dir` and `unreadable-file` — is the
+subset the caller turns into `ctx.emit_failure`, which is the channel a crash uses and
+pushes the run to exit `3` (D54). The other two kinds are not failures at all:
+`max_bytes` exists to be hit and repositories contain images, so a tool that exits `3`
+because it met a minified bundle has spent exit `3` on nothing. Those go to
+`ctx.emit_skip`, aggregated to one line per kind with a count, because the count is
+the entire message there and a skip list with one entry per vendored asset buries the
+skips that matter. The failures are listed individually and uncapped, matching what
+the crawler does with pages it could not fetch: a caller that needs to know the scan
+was partial needs to know which paths were missing from it.
+
+**The problem list is an argument, not a return value.** `iter_source_files` is a
+generator, so anything it returns arrives after the caller has stopped iterating, and
+a `StopIteration` value is not something a `for` statement can see at all. The caller
+owns a list, passes it in, and reads it once the walk is done. Passing nothing is
+still allowed and still drops the reasons, which is exactly what every caller did
+before this entry — so the parameter's default is the old behaviour, and the fix is
+that the one real caller now supplies the list.
+
+**`why_exception` moved to `core/context.py`.** It was the crawler's private `_why`
+until D66 gave it a second caller in `dast/exposed.py`; this is the third, and a
+`sast` module importing from `dast` to borrow a helper is the wrong shape for a right
+reason. It now lives beside `ScanError` and `emit_failure`, which is where "how a
+failure is described to the operator" is already decided, and both DAST callers
+import it from there. Third caller, then extract — the same rule as D64's
+`summary_line`, for the same reason: two copies of one description drift.
+
+**Measured against a real unreadable directory, not a mock.** A directory stripped to
+`SYSTEM`-only by `icacls`, holding a planted `eval()`, inside a tree with nothing else
+wrong: before, exit `0`, no errors, no mention of the directory; after, exit `3` and
+`[sast/locked] unlistable-dir: PermissionError: [WinError 5] Access is denied`. The
+unit gates use a `scandir` that refuses one path and a `stat` that fails one file,
+because a permission model that behaves identically on both platforms does not exist
+and the failure `os.walk` hides is exactly a `scandir` that raised. Eight mutations,
+eight red runs: dropping `onerror`, restoring the bare `continue`, collapsing
+`unreadable-file` into `binary`, deleting the report call, emptying
+`INCOMPLETE_KINDS`, removing the problem sink, marking the skip as a whole-scanner
+one, and hardcoding the plural. Suite 554 to 565.
+
+**Why:** Seventh instance of one pattern, and the first where it had already been
+found. Everything needed to fix this was written down in the module that had the bug:
+which function returned the wrong thing, which line dropped it, and what that cost.
+What was missing was the step after understanding it. So the rule this adds to the
+earlier six is about the write-up rather than the code — a documented gap must carry
+either a fix or a test that fails, because a paragraph explaining why the scan is
+incomplete is indistinguishable, to the person reading the report, from no paragraph
+at all.
 
 ---
 

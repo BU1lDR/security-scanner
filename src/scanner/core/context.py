@@ -59,6 +59,24 @@ def _format_tb(exc: BaseException) -> str:
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
 
+def why_exception(exc: BaseException) -> str:
+    """An exception as one short line, class name included.
+
+    The class name is not decoration: ``ConnectTimeout`` and ``ConnectError`` carry
+    different remedies, ``PermissionError`` and ``FileNotFoundError`` carry different
+    ones again, and several httpx exceptions stringify to the empty string, which
+    would otherwise reach a report as a blank reason.
+
+    It lives here, beside ``ScanError`` and ``emit_failure``, because this module is
+    where "how a failure is described to the operator" is decided. It was private to
+    the crawler; D66 gave it a second caller and D67 a third, in a different scanner,
+    and a `sast` module importing from `dast` to borrow it would have been the wrong
+    shape for the right reason.
+    """
+    text = str(exc).strip()
+    return f"{exc.__class__.__name__}: {text}" if text else exc.__class__.__name__
+
+
 @dataclass
 class ScanContext:
     target: "Target"

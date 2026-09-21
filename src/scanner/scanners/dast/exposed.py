@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
+from scanner.core.context import why_exception
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.location import Location
-from scanner.scanners.dast.crawler import why_exception
 
 # An unlikely path used to learn the site's "not found" response.
 _CALIBRATION_PATH = "secscan-calibration-404-do-not-exist-9f3a"
