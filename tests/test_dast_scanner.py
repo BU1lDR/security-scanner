@@ -151,7 +151,7 @@ def test_tls_findings_flow_through_when_enabled(monkeypatch):
     http = _FakeHttp(url, _Resp(200, headers={}))
 
     async def fake_fetch(u, gate, **kwargs):
-        return _expired_cert(), "TLSv1.3"
+        return (_expired_cert(), "TLSv1.3"), None
 
     monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
     ids = {f.rule_id for f in _collect(_ctx(url, http, tls=True))}
@@ -171,7 +171,7 @@ def test_the_tls_probe_is_handed_the_http_clients_own_gate(monkeypatch):
 
     async def fake_fetch(u, gate, **kwargs):
         seen.update(url=u, gate=gate)
-        return _expired_cert(), "TLSv1.3"
+        return (_expired_cert(), "TLSv1.3"), None
 
     monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
     ctx = _ctx(url, http, tls=True)
@@ -265,7 +265,7 @@ def test_the_tls_probe_follows_an_http_entry_to_its_https_landing(monkeypatch):
 
     async def fake_fetch(u, gate, **kwargs):
         seen["url"] = u
-        return _expired_cert(), "TLSv1.3"
+        return (_expired_cert(), "TLSv1.3"), None
 
     monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
     ctx = _ctx(url, http, tls=True)
@@ -286,7 +286,7 @@ def test_an_https_entry_landing_on_http_still_reads_the_certificate_it_used(monk
 
     async def fake_fetch(u, gate, **kwargs):
         seen["url"] = u
-        return _expired_cert(), "TLSv1.3"
+        return (_expired_cert(), "TLSv1.3"), None
 
     monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
     ids = {f.rule_id for f in _collect(_ctx(url, http, tls=True))}
@@ -378,3 +378,82 @@ def test_a_redirect_out_of_scope_is_reported_by_the_passive_tier_too():
     assert len(out) == 1
     assert "redirect-out-of-scope" in out[0].message
     assert "tracker.elsewhere.com" in out[0].message
+
+
+# ── a certificate that could not be read is not a good certificate (D70) ──
+
+def test_a_failed_handshake_is_reported_not_scored_as_a_clean_certificate(monkeypatch):
+    """The defect: fetch_tls returned a bare None on any handshake failure and
+    this method turned it into []. A host whose TLS could not be read produced
+    byte-identical output to a host with a flawless certificate."""
+    url = "https://example.com/"
+    http = _FakeHttp(url, _Resp(200, headers={}))
+
+    async def fake_fetch(u, gate, **kwargs):
+        return None, "the TLS handshake with example.com:443 did not complete"
+
+    monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
+    ctx = _ctx(url, http, tls=True)
+
+    ids = {f.rule_id for f in _collect(ctx)}
+
+    assert not any(i.startswith("dast.tls.") for i in ids)
+    # On ctx.errors, which is the channel that moves the run to exit 3 -- not
+    # ctx.skipped, which deliberately does not.
+    tls_errors = [e for e in ctx.errors if e.check == "tls"]
+    assert len(tls_errors) == 1
+    assert "did not complete" in tls_errors[0].message
+    assert [s for s in ctx.skipped if s.check == "tls"] == []
+
+
+def test_a_handshake_failure_with_no_reason_still_says_something(monkeypatch):
+    """Belt and braces on the `why or ...` fallback: a caller that returns None
+    for both must not produce an empty error message."""
+    url = "https://example.com/"
+    http = _FakeHttp(url, _Resp(200, headers={}))
+
+    async def fake_fetch(u, gate, **kwargs):
+        return None, None
+
+    monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
+    ctx = _ctx(url, http, tls=True)
+    _collect(ctx)
+
+    tls_errors = [e for e in ctx.errors if e.check == "tls"]
+    assert len(tls_errors) == 1
+    assert tls_errors[0].message.strip()
+
+
+def test_a_readable_certificate_records_no_tls_failure(monkeypatch):
+    """The other direction. Without it, an emit_failure that fired unconditionally
+    would satisfy the assertions above (D43)."""
+    url = "https://example.com/"
+    http = _FakeHttp(url, _Resp(200, headers={}))
+
+    async def fake_fetch(u, gate, **kwargs):
+        return (_expired_cert(), "TLSv1.3"), None
+
+    monkeypatch.setattr(dast_scanner, "fetch_tls", fake_fetch)
+    ctx = _ctx(url, http, tls=True)
+
+    ids = {f.rule_id for f in _collect(ctx)}
+
+    assert "dast.tls.expired-cert" in ids
+    assert [e for e in ctx.errors if e.check == "tls"] == []
+
+
+def test_the_three_deliberate_tls_declines_stay_skips_not_failures():
+    """The distinction the fix rests on. Switched off in config and plain HTTP are
+    decisions somebody made; they are disclosed but must not raise the exit code,
+    or every scan of an http:// site would come back incomplete."""
+    off = _ctx("https://example.com/", _FakeHttp("https://example.com/",
+                                                _Resp(200, headers={})), tls=False)
+    _collect(off)
+    assert [s.check for s in off.skipped if s.check == "tls"] == ["tls"]
+    assert [e for e in off.errors if e.check == "tls"] == []
+
+    url = "http://example.com/"
+    plain = _ctx(url, _FakeHttp(url, _Resp(200, headers={})), tls=True)
+    _collect(plain)
+    assert [s.check for s in plain.skipped if s.check == "tls"] == ["tls"]
+    assert [e for e in plain.errors if e.check == "tls"] == []

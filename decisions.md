@@ -7,7 +7,7 @@
 > **Rule for this file:** simple words. If a term is jargon, it gets explained here in a way any person can understand. This file grows as the project grows.
 
 **Last updated:** 2026-09-21
-**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 577 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
+**Status:** **v1.3.1 is the current release.** All three scanners ship — SCA against OSV.dev, SAST over the source tree, passive DAST plus the opt-in active checks behind the authorization gate — with the CLI, three report formats and 582 tests. Integration seams are in `docs/specs/v1-integration-contract.md`, and since D65 that document's frozen names and enum values are checked against the code by `tests/test_contract.py` rather than asserted here. Every tag from v1.0.0 has [published notes](https://github.com/BU1lDR/security-scanner/releases) saying what changed in it and what was still wrong; v1.1.0 in particular is superseded by v1.1.1, and its notes say so on the page rather than only here.
 
 This line said "v1.0.0 released" until two releases after that stopped being true. The version number is the one fact about a project that changes on a schedule nothing here can guard: the test count beside it is checked by `tools/check_test_count.py` on every push, and no equivalent exists for a status line, because "which release is current" is not derivable from the tree — a tag is a name someone chose to attach to a commit, and the commit it points at looks no different from any other. The check that would work is the one now in place for the number: a release page per tag, so the claim and the artifact are created in the same motion and a missing page is visible from the outside.
 
@@ -1999,6 +1999,84 @@ and every file that would have. The tell was in the source the whole time: a
 comment justifying why two checks are kept independent, sitting directly above a
 handler that could erase both. When the reason for a design is written down next
 to code that defeats it, the comment is the bug report.
+
+---
+
+### D70 — A certificate that could not be read scored the same as a valid one
+
+**Four ways out of the TLS check, three of them disclosed.** `_tls_check` stops
+early when the check is switched off in config, when the target is plain HTTP and
+has no certificate to read, and when no HTTP client was wired to authorize the raw
+socket through. Each of those calls `emit_skip` with a sentence saying which one
+happened. The fourth was `fetch_tls` returning `None`, which the caller turned
+into an empty finding list and nothing else. Measured against a closed port on
+loopback: no findings, no errors, no skips — byte-identical to a host with a
+flawless certificate. The three deliberate declines were all reported; the one
+case where the machine refused us was the only silent one.
+
+**The docstring argued for it, which is why it survived seven earlier fixes of
+this same shape.** It read: "A failed handshake is the target's business and simply
+means no TLS findings." The first half is true and the second does not follow.
+"No TLS findings" is a claim about a certificate, and a handshake that did not
+complete leaves us without one to make the claim about. The same sentence would
+justify D66, where a probe that could not connect reported the file as not
+exposed, and D42, where an OSV outage reported the dependencies as clean.
+
+**A failure, not a skip.** The operator enabled `dast.tls.enabled` and asked for
+the certificate to be checked; it was not checked. That belongs on `ctx.errors`
+and exit 3, where the crawler's unreachable pages and the SAST walk's unlistable
+directories already go. The three declines stay skips, and a test now pins that
+distinction in both directions — promoting either one to a failure would put every
+scan of an `http://` site at exit 3, which spends the exit code on nothing.
+
+**`fetch_tls` now returns `(value, None)` or `(None, reason)`.** The fifth use of
+that shape, after the crawler, the exposed-file probe, the redirect chain and the
+source walk. The scope refusal still *raises*, and keeping that asymmetry is the
+point: a refusal is our bug and must not be absorbed by the same `except
+Exception` that catches a connection failure, so one leaves as an exception and
+the other as a reason. The reason carries the cause and not just the fact —
+`why_exception(exc)` — because "the handshake did not complete" without
+`ConnectionRefusedError` tells an operator nothing they can act on.
+
+**One of the tests was named after the bug.** `test_an_unreachable_in_scope_host_`
+`is_still_a_quiet_none` asserted the silence, and its docstring reproduced the
+docstring's argument for it. A test can only protect the behaviour somebody wrote
+down, and what was written down here was the defect. It is renamed and inverted.
+That is the third time in this log a green test turned out to be pinning the thing
+that needed fixing (D57, D66), and the pattern in all three is the same: the test
+was written from the implementation rather than from what the report should say.
+
+**§9 of the contract stated the old return in prose, and that paragraph has now
+been wrong twice.** It ends with "For two commits this paragraph was true of the
+contract and false of the code — see decisions.md D45", and it was false again.
+Every gate D65 and D68 built reads fenced ` ```python ` blocks, so a signature
+stated in a sentence is invisible to all of them. `tests/test_contract.py` now
+parses inline `name(params)` claims out of the prose with the blocks stripped,
+resolves each name by walking `scanner.*`, and compares parameters through the
+same two helpers the block gates use. Claims with empty parentheses or containing
+`...` are illustrative and dropped; four real ones remain. The gate found a second
+error the moment it ran: the prose said `*, timeout`, with no default, which reads
+as a parameter the caller must supply.
+
+**Seventeen mutations, seventeen red.** Ten on the behaviour: swallowing the
+failure again, downgrading it to a skip, losing the reason, losing the cause
+inside the reason, reporting a spurious problem on a good handshake, emitting
+unconditionally, and promoting each of the two deliberate declines to a failure.
+Seven on the new prose gate, from both sides — dropping the default, dropping the
+keyword-only marker, renaming a parameter and deleting the whole claim so the gate
+goes vacuous, then the same renames and default changes made in the code instead.
+Suite 577 to 582.
+
+**Why:** Seven entries of this log have fixed one silent non-answer each, and this
+one was defended in writing by the module that contained it. That is the thing
+worth noticing: the comment was not absent or stale, it was a reasoned argument
+whose second clause did not follow from its first, and it had a passing test
+underneath it named after the behaviour it was defending. A gap with a rationale
+and a green test is better hidden than a gap with neither, because both of the
+signals that would normally find it have already been spent. The check that
+mattered was not a sharper reading of the code but a comparison of two report
+outputs: a healthy target and a broken one, side by side, asking whether they
+differ.
 
 ---
 

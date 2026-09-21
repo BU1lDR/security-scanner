@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 from cryptography import x509
 
+from scanner.core.context import why_exception
 from scanner.core.finding import Confidence, Finding, Severity
 from scanner.core.gate import OutOfScopeError, RequestClass, RequestGate
 from scanner.core.location import Location
@@ -113,8 +114,18 @@ def _fetch_blocking(host: str, port: int, timeout: float) -> tuple[x509.Certific
     return x509.load_der_x509_certificate(der), protocol
 
 
-async def fetch_tls(url: str, gate: RequestGate, *, timeout: float = 15.0):
-    """Return ``(certificate, protocol)`` for ``url`` or ``None`` if unreachable.
+async def fetch_tls(
+    url: str, gate: RequestGate, *, timeout: float = 15.0
+) -> tuple[tuple[x509.Certificate, str | None] | None, str | None]:
+    """Return ``((certificate, protocol), None)``, or ``(None, reason)`` if the
+    handshake could not be made.
+
+    **Two return values, because there is no certificate that means "we could not
+    read one".** This used to return ``None`` on any failure, and the caller turned
+    that into an empty finding list — so a host whose handshake timed out produced
+    exactly the output of a host with a flawless certificate: no findings, no
+    error, nothing said (D70). ``reason`` is a sentence naming what went wrong, for
+    the caller to put on the report.
 
     ``gate`` is required, and required *positionally*, because this function
     bypasses the HTTP choke point and therefore has to re-apply the same scope
@@ -128,19 +139,22 @@ async def fetch_tls(url: str, gate: RequestGate, *, timeout: float = 15.0):
     permits this raw-socket path "only to a host already in Scope", and the tool
     has no business handshaking with its own providers.
 
-    **A refusal raises; an unreachable host returns ``None``.** The asymmetry is
-    deliberate. A failed handshake is the target's business and simply means no TLS
-    findings. A scope refusal means the scanner tried to touch something it was not
-    authorized to touch, which is *our* bug, and it must not be swallowed by the
-    same ``except`` that absorbs connection failures — it has to reach the report
-    via ``ctx.run_check`` instead of looking like a site that has no TLS.
+    **A refusal raises; an unreachable host comes back as a reason.** The asymmetry
+    is deliberate. A scope refusal means the scanner tried to touch something it was
+    not authorized to touch, which is *our* bug: it must not be absorbed by the same
+    ``except`` that catches connection failures, and it reaches the report as an
+    exception through ``ctx.run_check``. A failed handshake is the target's business
+    and produces no findings — but "no findings" is a claim about the certificate,
+    and we do not have one to make it about, so it is reported too.
 
     The blocking socket work runs in a worker thread so it never stalls the event
-    loop. Only ``https`` URLs are probed.
+    loop. Only ``https`` URLs are probed; the caller filters the rest out first and
+    has a better sentence for them, so the reason given here is a backstop.
     """
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
-        return None  # nothing will be reached, so there is nothing to authorize
+        # Nothing will be reached, so there is nothing to authorize.
+        return None, f"{url!r} is not an https URL with a host, so there is no handshake"
     if gate.authorize(url) is not RequestClass.TARGET:
         raise OutOfScopeError(
             f"Refusing a raw TLS handshake with {url!r}: the certificate probe is "
@@ -149,9 +163,13 @@ async def fetch_tls(url: str, gate: RequestGate, *, timeout: float = 15.0):
         )
     port = parts.port or 443
     try:
-        return await asyncio.to_thread(_fetch_blocking, parts.hostname, port, timeout)
-    except Exception:  # noqa: BLE001 - unreachable/handshake failure is not our finding
-        return None
+        result = await asyncio.to_thread(_fetch_blocking, parts.hostname, port, timeout)
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        return None, (
+            f"the TLS handshake with {parts.hostname}:{port} did not complete, so no "
+            f"certificate was read: {why_exception(exc)}"
+        )
+    return result, None
 
 
 def now_utc() -> datetime:

@@ -132,8 +132,15 @@ class DastScanner(Scanner):
             return []
         # The probe skips the HTTP choke point, so it is handed that client's own
         # gate and authorizes through it (contract §9). Same boundary, one owner.
-        result = await fetch_tls(probe_url, ctx.http.gate)
+        result, why = await fetch_tls(probe_url, ctx.http.gate)
         if result is None:
+            # Every other way out of this method is a decision we made and
+            # disclosed: switched off, plain HTTP, no client. This one is the
+            # machine refusing us, and it was the only one that said nothing --
+            # an unreadable certificate scored the same report as a perfect one
+            # (D70). A failure, not a skip: the operator asked for the
+            # certificate to be checked and it was not.
+            ctx.emit_failure("dast", "tls", why or "the certificate could not be read")
             return []
         cert, protocol = result
         return analyze_tls(probe_url, cert, protocol, now_utc())

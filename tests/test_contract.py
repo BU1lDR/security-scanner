@@ -65,6 +65,58 @@ _DOC_METHOD = re.compile(
 #: A `- `Location.for_x(a, b=None)`` constructor bullet from §3.
 _DOC_CONSTRUCTOR = re.compile(r"^- `Location\.(\w+)\(([^)]*)\)`", re.MULTILINE)
 
+#: An inline `name(params)` claim in the contract's *prose*, outside the fenced
+#: blocks every gate above reads. §9 states `fetch_tls`'s signature this way and has
+#: now been wrong about this function twice — D45, then D70 — in the same paragraph,
+#: which is what makes prose worth parsing rather than trusting.
+_DOC_INLINE_CALL = re.compile(r"`([A-Za-z_][\w.]*)\(([^`)]*)\)`")
+
+#: The document with its fenced blocks removed, so the two gates do not overlap.
+_PROSE = _PY_BLOCK.sub("", _TEXT)
+
+
+def _scanner_namespace() -> dict[str, object]:
+    """Every top-level name in every importable `scanner.*` module.
+
+    Built by walking the package rather than from a list, so a signature the
+    contract states in prose is resolved wherever it actually lives.
+    """
+    import scanner
+
+    found: dict[str, object] = {}
+    for info in pkgutil.walk_packages(scanner.__path__, prefix="scanner."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:                       # an optional import, not our concern
+            continue
+        for key, value in vars(module).items():
+            if not key.startswith("_"):
+                found.setdefault(key, value)
+    return found
+
+
+def _inline_signature_claims() -> dict[str, tuple[str, object]]:
+    """The prose's `name(params)` claims that assert a signature, resolved.
+
+    Two kinds are dropped rather than checked. A claim with empty parentheses
+    (`AsyncHttpClient.request()`) asserts nothing about parameters, and one
+    containing `...` (`ctx.run_check(...)`, `Fix(kind=..., details={...})`) is
+    illustrative by construction. What is left is a real promise about a real
+    signature.
+    """
+    namespace = _scanner_namespace()
+    claims: dict[str, tuple[str, object]] = {}
+    for dotted, params in _DOC_INLINE_CALL.findall(_PROSE):
+        if not params.strip() or "..." in params:
+            continue
+        head, _, attr = dotted.rpartition(".")
+        target = namespace.get(head or dotted)
+        if head and target is not None:
+            target = getattr(target, attr, None)
+        if callable(target):
+            claims[dotted] = (params, target)
+    return claims
+
 
 def _params(text: str) -> list[str]:
     """Parameter names from a signature's inside, `self`/`cls` dropped, `*` kept.
@@ -365,3 +417,25 @@ def test_the_location_constructors_have_the_documented_signatures():
         for name, value in vars(Location).items()
         if isinstance(value, classmethod) and not name.startswith("_")
     }, "§3's constructor list and Location's classmethods disagree"
+
+
+def test_every_signature_the_prose_states_matches_the_code():
+    """§9 states `fetch_tls(url, gate, *, timeout)` in a sentence, not a code block,
+    so every structural gate above reads straight past it. That paragraph has been
+    false twice: D45 (the gate argument) and D70 (the return contract). Prose in a
+    document that calls itself the source of truth is a claim like any other."""
+    claims = _inline_signature_claims()
+    # Positive control, and named rather than counted: this gate exists for this
+    # function, and a regex that stopped matching would otherwise check nothing
+    # and pass (D43).
+    assert "fetch_tls" in claims, (
+        "the prose no longer states fetch_tls's signature, or the parser stopped "
+        "finding it -- either way this gate is now vacuous"
+    )
+    assert len(claims) >= 4, f"only {len(claims)} prose signature claims parsed"
+
+    for dotted, (params, func) in sorted(claims.items()):
+        assert _params(params) == _signature_params(func), (
+            f"{dotted}: the contract's prose says ({', '.join(_params(params))}), "
+            f"the code takes ({', '.join(_signature_params(func))})"
+        )

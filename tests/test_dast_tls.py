@@ -123,19 +123,23 @@ def test_an_egress_host_is_refused_even_though_an_http_request_there_is_allowed(
         asyncio.run(fetch_tls("https://api.anthropic.com/", gate))
 
 
-def test_an_unreachable_in_scope_host_is_still_a_quiet_none(monkeypatch):
-    """The deliberate asymmetry: unreachable is quiet, unauthorized is loud.
-
-    A failed handshake is the target's business and simply means no TLS
-    findings. A scope refusal means *we* tried to touch something we were not
-    authorized to touch — our bug — so it must not be swallowed by the same
-    ``except Exception`` that absorbs connection failures.
+def test_an_unreachable_in_scope_host_comes_back_with_a_reason(monkeypatch):
+    """The deliberate asymmetry, corrected: unauthorized raises, unreachable
+    reports. It used to return a bare ``None``, and the name of this test was
+    ``..._is_still_a_quiet_none`` — quiet was the bug (D70). A scope refusal is
+    *our* error and still must not be absorbed by the same ``except Exception``
+    that catches connection failures, which is what the test below checks.
     """
     def _boom(*args, **kwargs):
         raise OSError("connection refused")
 
     monkeypatch.setattr(tls_module, "_fetch_blocking", _boom)
-    assert asyncio.run(fetch_tls("https://target.example/", _gate("target.example"))) is None
+    result, why = asyncio.run(
+        fetch_tls("https://target.example/", _gate("target.example"))
+    )
+    assert result is None
+    assert "handshake with target.example:443 did not complete" in why
+    assert "connection refused" in why       # the cause survives, not just the fact
 
 
 def test_an_in_scope_host_is_probed_with_its_own_host_port_and_timeout(monkeypatch):
@@ -146,19 +150,23 @@ def test_an_in_scope_host_is_probed_with_its_own_host_port_and_timeout(monkeypat
         return ("cert-sentinel", "TLSv1.3")
 
     monkeypatch.setattr(tls_module, "_fetch_blocking", _record)
-    result = asyncio.run(
+    result, why = asyncio.run(
         fetch_tls("https://target.example:8443/deep/path", _gate("target.example"), timeout=3.0)
     )
     assert result == ("cert-sentinel", "TLSv1.3")
+    assert why is None, "a successful handshake must not also report a problem"
     assert seen == {"host": "target.example", "port": 8443, "timeout": 3.0}
 
 
 def test_a_non_https_url_is_skipped_without_needing_authorization(monkeypatch):
     """Ordering check: "nothing to probe" is decided before authorization.
 
-    A plain-http target is not a TLS finding and not an error either, so it stays
-    a quiet ``None`` even under a deny-all scope. Nothing has been reached at
-    this point, so there is nothing to authorize.
+    Nothing has been reached at this point, so there is nothing to authorize --
+    the ``_tripwire`` fires if the socket is opened anyway. The reason is a
+    backstop: the real caller filters plain HTTP out first and emits a better
+    sentence for it, so this branch is unreachable from the scanner.
     """
     monkeypatch.setattr(tls_module, "_fetch_blocking", _tripwire)
-    assert asyncio.run(fetch_tls("http://target.example/", _gate())) is None
+    result, why = asyncio.run(fetch_tls("http://target.example/", _gate()))
+    assert result is None
+    assert "not an https URL" in why
